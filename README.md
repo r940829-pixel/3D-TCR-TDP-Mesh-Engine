@@ -2,6 +2,7 @@
 
 [![License: Academic Use](https://img.shields.io/badge/License-Academic_Research-blue.svg)]()
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-green.svg)]()
+[![DOI](https://zenodo.org/badge/1291166293.svg)](https://doi.org/10.5281/zenodo.21224235)
 
 An advanced, high-fidelity boundary-conformal mesh pre-processing engine developed for advanced computational physics and multi-orbital electron kinematics simulations. This repository implements the **Three-Dimensional Time-Coherent Resonance (3D TCR)** analytical manifold mapping system and the hybrid **TCR-Driven Poisson Elliptic PDE (TDP)** framework.
 
