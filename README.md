@@ -16,7 +16,7 @@ The core 3D TCR transformation maps parametric computational space $(\xi, \eta, 
 
 $$|J| = \frac{n(\theta)}{2} \csc(2\theta)$$
 
-Where $n(\theta) = \frac{1}{2}r^2|\sin(2\theta)|$. At the base harmonic state, the system naturally degenerates into standard Cartesian spherical mapping ($O(1)$ complexity), while automatically enforcing structural logarithmic-like grid contraction tunnels along the polar singularity axes without iterative relaxation costs.
+Where $n(\theta) = \frac{1}{2}r^2|\sin(2\theta)|$. At the base harmonic state, the system naturally degenerates into standard Cartesian spherical mapping ($O(N)$ complexity), while automatically enforcing structural logarithmic-like grid contraction tunnels along the polar singularity axes without iterative relaxation costs.
 
 ---
 
