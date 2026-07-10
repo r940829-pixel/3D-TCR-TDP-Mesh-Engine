@@ -23,7 +23,7 @@ Where $n(\theta) = \frac{1}{2}r^2|\sin(2\theta)|$. At the base harmonic state, t
 ## 📊 Benchmarking & Experimental Verification
 
 The architecture evaluates three explicit comparative cases across an ablation study pipeline:
-- **Case A: Pure Analytical 3D TCR Manifold** ($O(1)$ analytic closed-form)
+- **Case A: Pure Analytical 3D TCR Manifold** ($O(N)$ analytic closed-form)
 - **Case B: TCR-Driven Poisson Elliptic PDE (TDP)** ($O(N^3)$ hybrid field tracking)
 - **Case C: Pure Non-Source Laplace Elliptic PDE** ($O(N^3)$ classical homogeneous baseline)
 
