@@ -34,8 +34,8 @@ def get_coupled_system_specification():
         "r_val": 5.0,
         "max_iter": 600,
         "tol": 1e-5,
-        "omega": 1.40,                   
-        "scaling_control": 0.85,         
+        "omega": 1.75,                   
+        "scaling_control": 0.15,         
         "output_filename": "tdp_mesh_journal.json"
     }
 
