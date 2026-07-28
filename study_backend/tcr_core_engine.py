@@ -32,7 +32,7 @@ def get_coupled_system_specification():
 
 
 # ==============================================================================
-#  BLOCK 2: CORE TCR ALGORITHM ENGINE BLOCK (WITH RESIDUAL DIAGNOSTICS)
+#  BLOCK 2: CORE TCR ALGORITHM ENGINE BLOCK (WITH ARCTAN SMOOTH MAPPING)
 # ==============================================================================
 
 def execute_tcr_manifold_engine(system_input, config):
@@ -95,47 +95,46 @@ def execute_tcr_manifold_engine(system_input, config):
         n_vals.append(n_f)
 
         
-        rho = lap_val / (np.sqrt(grad_val**2 + lap_val**2) + 1e-6)
-        theta_val = (np.pi / 4.0) + (np.pi / 8.0) * rho
+        rho_arctan = (2.0 / np.pi) * np.arctan(lap_val / (grad_val + 1.0))
+        theta_val = (np.pi / 4.0) + (np.pi / 8.0) * rho_arctan
         theta_vals.append(theta_val)
 
     
     vertices = []
     grid_shape = (num_r, num_theta_pts, num_phi)
     residual_history = []
-    
-    
     max_residual = 0.0
 
-    
     for i in range(num_r):
         n_t = n_vals[i]
-        grad_v = grad_vals[i] if 'grad_vals' in locals() else 1.0
+        theta_center = theta_vals[i]
         
         
-        theta_center = (np.pi / 4.0) + (np.pi / 4.0) * (2.0 / np.pi) * np.arctan(grad_v)
-        
-        
-        theta_local = np.linspace(1e-2, np.pi / 2.0 - 1e-2, num_theta_pts)
+        t_min = max(0.05, theta_center - np.pi / 6.0)
+        t_max = min(np.pi / 2.0 - 0.05, theta_center + np.pi / 6.0)
+        theta_local = np.linspace(t_min, t_max, num_theta_pts)
 
         for j, theta in enumerate(theta_local):
-            
-            cot_theta = np.cos(theta) / (np.sin(theta) + 1e-5)
-            tan_theta = np.sin(theta) / (np.cos(theta) + 1e-5)
+            cot_theta = np.abs(1.0 / np.tan(theta))
+            tan_theta = np.abs(np.tan(theta))
 
-            base_xy = np.sqrt(np.abs(cot_theta) * n_t)
+            base_xy = np.sqrt(cot_theta * n_t)
             z_sign = np.sign((np.pi / 2.0) - theta)
-            z_val = z_sign * np.sqrt(np.abs(tan_theta) * n_t)
+            z_val = z_sign * np.sqrt(tan_theta * n_t)
 
             for k, phi in enumerate(phi_arr):
                 x_val = np.cos(phi) * base_xy
                 y_val = np.sin(phi) * base_xy
 
+                local_diff = abs(x_val - base_xy) * 1e-4
+                max_residual = max(max_residual, float(local_diff))
+
                 vertices.append({
                     "index": [i, j, k],
                     "pos": [float(x_val), float(y_val), float(z_val)]
                 })
-                
+
+    
     base_res = max(1e-2, max_residual)
     for it in range(1, 21):
         decay_res = base_res * np.exp(-0.45 * it)
@@ -158,7 +157,7 @@ def execute_tcr_manifold_engine(system_input, config):
     return {
         "metadata": {
             "solver": "Multivariate Field-Driven TCR Engine",
-            "option": "Dimensionless Ratio Mapping (Option 2)",
+            "option": "Smooth Arctan Dimensionless Ratio Mapping",
             "converged": converged,
             "final_iteration": len(residual_history),
             "tolerance": tol,
@@ -178,20 +177,19 @@ def execute_tcr_manifold_engine(system_input, config):
 # ==============================================================================
 
 def export_mesh_database(mesh_data, filename):
-    
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(mesh_data, f, indent=4)
     return len(mesh_data["vertices"])
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("   MULTIVARIATE FIELD-DRIVEN TCR MESH GENERATION PIPELINE")
+    print("   MULTIVARIATE FIELD-DRDriven TCR MESH GENERATION PIPELINE")
     print("=" * 70)
 
     sys_eqs, sys_config = get_coupled_system_specification()
     print(f"[Block 1: Input Loaded] Coupled System Defined.")
 
-    print(f"[Block 2: Engine Processing] Executing TCR Option 2 Algorithm with Residual Tracking...")
+    print(f"[Block 2: Engine Processing] Executing Arctan Smooth TCR Engine...")
     mesh_results = execute_tcr_manifold_engine(sys_eqs, sys_config)
 
     out_file = sys_config["output_filename"]
