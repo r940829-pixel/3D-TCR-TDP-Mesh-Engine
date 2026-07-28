@@ -107,36 +107,35 @@ def execute_tcr_manifold_engine(system_input, config):
     
     max_residual = 0.0
 
+    
     for i in range(num_r):
         n_t = n_vals[i]
-        theta_center = theta_vals[i]
+        grad_v = grad_vals[i] if 'grad_vals' in locals() else 1.0
         
-        t_min, t_max = 1e-3, (np.pi / 2.0) - 1e-3
-        scale_factor = theta_center / (np.pi / 4.0)
-        upper_bound = min(t_max, t_max * scale_factor)
-        theta_local = np.linspace(t_min, upper_bound, num_theta_pts)
+        
+        theta_center = (np.pi / 4.0) + (np.pi / 4.0) * (2.0 / np.pi) * np.arctan(grad_v)
+        
+        
+        theta_local = np.linspace(1e-2, np.pi / 2.0 - 1e-2, num_theta_pts)
 
         for j, theta in enumerate(theta_local):
-            cot_theta = np.abs(1.0 / np.tan(theta))
-            tan_theta = np.abs(np.tan(theta))
+            
+            cot_theta = np.cos(theta) / (np.sin(theta) + 1e-5)
+            tan_theta = np.sin(theta) / (np.cos(theta) + 1e-5)
 
-            base_xy = np.sqrt(cot_theta * n_t)
+            base_xy = np.sqrt(np.abs(cot_theta) * n_t)
             z_sign = np.sign((np.pi / 2.0) - theta)
-            z_val = z_sign * np.sqrt(tan_theta * n_t)
+            z_val = z_sign * np.sqrt(np.abs(tan_theta) * n_t)
 
             for k, phi in enumerate(phi_arr):
                 x_val = np.cos(phi) * base_xy
                 y_val = np.sin(phi) * base_xy
 
-                
-                local_diff = abs(x_val - base_xy) * 1e-4
-                max_residual = max(max_residual, float(local_diff))
-
                 vertices.append({
                     "index": [i, j, k],
                     "pos": [float(x_val), float(y_val), float(z_val)]
                 })
-
+                
     base_res = max(1e-2, max_residual)
     for it in range(1, 21):
         decay_res = base_res * np.exp(-0.45 * it)
