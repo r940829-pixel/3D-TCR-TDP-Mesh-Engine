@@ -1,17 +1,11 @@
-# ==============================================================================
-#  HIGH-FIDELITY TRACKING PHYSICS SOLVER & PUBLICATION VISUALIZER (COMPLETE)
-# ==============================================================================
-#  Author: Zhuang Huaijie
-#  Description: Dynamic Grid-Interpolated Lorentz Solver. Compares cell-resolved 
-#               trajectories against continuous ground truth to reveal drift errors.
-#  License: Academic Research Use Only
-# ==============================================================================
-
+import os
 import json
-import time
+import csv
 import numpy as np
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 from matplotlib import rcParams
+
 
 rcParams['font.family'] = 'serif'
 rcParams['mathtext.fontset'] = 'cm'
@@ -19,218 +13,393 @@ rcParams['axes.linewidth'] = 1.0
 rcParams['xtick.direction'] = 'in'
 rcParams['ytick.direction'] = 'in'
 
-def load_mesh_file(filename):
-    """Reads and parses serialized structured mesh JSON data."""
-    try:
-        with open(filename, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        print(f"[❌ ERROR] Target mesh database '{filename}' not found.")
-        return None
 
-def compute_mesh_quality_and_ortho(mesh_data):
-    """Evaluates geometric grid orthogonality metric scores with fixed tensor indexing."""
-    if mesh_data is None: return 0.0
-    vertices = mesh_data["vertices"]
-    grid_shape = mesh_data["grid_shape"]
-    X, Y, Z = np.zeros(grid_shape), np.zeros(grid_shape), np.zeros(grid_shape)
-    for node in vertices:
-        i, j, k = node["index"]
-        X[i, j, k], Y[i, j, k], Z[i, j, k] = node["pos"]
-        
-    ortho_deviations = []
-    for i in range(grid_shape[0] - 1):
-        for j in range(grid_shape[1] - 1):
-            for k in range(grid_shape[2]):
-                v_r = np.array([X[i+1, j, k] - X[i, j, k], Y[i+1, j, k] - Y[i, j, k], Z[i+1, j, k] - Z[i, j, k]])
-                
-                v_th = np.array([X[i, j+1, k] - X[i, j, k], Y[i, j+1, k] - Y[i, j, k], Z[i, j+1, k] - Z[i, j, k]])
-                
-                norm_r, norm_th = np.linalg.norm(v_r), np.linalg.norm(v_th)
-                if norm_r > 1e-5 and norm_th > 1e-5:
-                    ortho_deviations.append(np.abs(np.dot(v_r, v_th) / (norm_r * norm_th)))
-                    
-    return max(0.0, 100.0 * (1.0 - np.mean(ortho_deviations))) if ortho_deviations else 0.0
+MESH_DIR = "generated_meshes"
+REPORT_DIR = "quality_reports"
+VIS_DIR = os.path.join(REPORT_DIR, "visualizations")
 
-def solve_lorentz_trajectory(mesh_data, is_ground_truth=False, timesteps=1200, dt=4e-3):
-    """
-    True Numerical Engine: Simulates electron flight path. 
-    Evaluates the real discrete grid nodes to execute genuine physical 
-    field interpolation, exposing localized numerical dissipation caused by grid dilution.
-    """
-    q_over_m = -2.5  
-    pos = np.array([3.8, 0.0, 0.1])  
-    vel = np.array([-0.3, 3.5, 0.02]) 
+os.makedirs(REPORT_DIR, exist_ok=True)
+os.makedirs(VIS_DIR, exist_ok=True)
+
+
+class Hex8QualityEvaluator:
     
-    trajectory = []
-    node_positions = np.array([n["pos"] for n in mesh_data["vertices"]]) if mesh_data else None
-    
-    def get_analytic_E(p):
-        r_mag = np.linalg.norm(p)
-        if r_mag < 1e-2: r_mag = 1e-2
-        return -3.0 * p / (r_mag**2.8)
 
-    def get_interpolated_E(p):
-        if is_ground_truth or node_positions is None:
-            return get_analytic_E(p)
+    def __init__(self, json_filepath):
+        self.filepath = json_filepath
+        self.filename = os.path.basename(json_filepath)
+        with open(json_filepath, "r", encoding="utf-8") as f:
+            self.data = json.load(f)
+
+        self.grid_shape = self.data["grid_shape"]  # (num_r, num_theta, num_phi)
+        self.num_r, self.num_theta, self.num_phi = self.grid_shape
+        self.vertices = self.data["vertices"]
+
+        self._build_mesh_topology()
+
+    def _build_mesh_topology(self):
+       
+        self.nodes = np.zeros((len(self.vertices), 3), dtype=np.float64)
+        node_map = {}
+
+        for v in self.vertices:
+            i, j, k = v["index"]
+            flat_idx = i * (self.num_theta * self.num_phi) + j * self.num_phi + k
+            self.nodes[flat_idx] = v["pos"]
+            node_map[(i, j, k)] = (flat_idx, i, j, k)
+
+        self.elements = []
+        self.elem_indices = []
+
+        for i in range(self.num_r - 1):
+            for j in range(self.num_theta - 1):
+                for k in range(self.num_phi):
+                    k_next = (k + 1) % self.num_phi
+
+                    n0 = node_map[(i,   j,   k)][0]
+                    n1 = node_map[(i+1, j,   k)][0]
+                    n2 = node_map[(i+1, j+1, k)][0]
+                    n3 = node_map[(i,   j+1, k)][0]
+
+                    n4 = node_map[(i,   j,   k_next)][0]
+                    n5 = node_map[(i+1, j,   k_next)][0]
+                    n6 = node_map[(i+1, j+1, k_next)][0]
+                    n7 = node_map[(i,   j+1, k_next)][0]
+
+                    self.elements.append([n0, n1, n2, n3, n4, n5, n6, n7])
+                    self.elem_indices.append((i, j, k))
+
+        self.elements = np.array(self.elements)
+
+    @staticmethod
+    def _hex8_shape_derivatives(xi, eta, zeta):
         
-        sq_dists = np.sum((node_positions - p)**2, axis=1)
-        nearest_indices = np.argsort(sq_dists)[:4]  
+        return 0.125 * np.array([
+            [-(1-eta)*(1-zeta),  (1-eta)*(1-zeta),  (1+eta)*(1-zeta), -(1+eta)*(1-zeta),
+             -(1-eta)*(1+zeta),  (1-eta)*(1+zeta),  (1+eta)*(1+zeta), -(1+eta)*(1+zeta)],
+            [-(1-xi)*(1-zeta),  -(1+xi)*(1-zeta),   (1+xi)*(1-zeta),   (1-xi)*(1-zeta),
+             -(1-xi)*(1+zeta),  -(1+xi)*(1+zeta),   (1+xi)*(1+zeta),   (1-xi)*(1+zeta)],
+            [-(1-xi)*(1-eta),   -(1+xi)*(1-eta),   -(1+xi)*(1+eta),   -(1-xi)*(1+eta),
+              (1-xi)*(1-eta),    (1+xi)*(1-eta),    (1+xi)*(1+eta),    (1-xi)*(1+eta)]
+        ])
+
+    def evaluate_mesh(self):
         
-        weights = 1.0 / (np.sqrt(sq_dists[nearest_indices]) + 1e-6)
-        weights /= np.sum(weights)
-        
-        E_interp = np.zeros(3)
-        for idx, w in zip(nearest_indices, weights):
-            E_interp += w * get_analytic_E(node_positions[idx])
+        g_pts = [-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0)]
+        gauss_3d = [(xi, eta, zeta) for xi in g_pts for eta in g_pts for zeta in g_pts]
+
+        metrics = []
+        inverted_list = []
+
+        for elem_id, (elem, idx) in enumerate(zip(self.elements, self.elem_indices)):
+            pts = self.nodes[elem]
+            i_idx, j_idx, k_idx = idx
+
             
-        return E_interp
+            dN_center = self._hex8_shape_derivatives(0.0, 0.0, 0.0)
+            J_center = np.dot(dN_center, pts)
+            det_J_center = np.linalg.det(J_center)
 
-    B_field = np.array([0.0, 0.0, 1.5])
+            det_J_min = det_J_center
+            for xi, eta, zeta in gauss_3d:
+                dN = self._hex8_shape_derivatives(xi, eta, zeta)
+                J_gp = np.dot(dN, pts)
+                det_J_gp = np.linalg.det(J_gp)
+                if det_J_gp < det_J_min:
+                    det_J_min = det_J_gp
 
-    for _ in range(timesteps):
-        trajectory.append(pos.copy())
-        
-        # --- RK4 Step 1 ---
-        E1 = get_interpolated_E(pos)
-        k1_pos = vel.copy()
-        k1_vel = q_over_m * (E1 + np.cross(vel, B_field))
-        
-        # --- RK4 Step 2 ---
-        pos_k2 = pos + 0.5 * dt * k1_pos
-        vel_k2 = vel + 0.5 * dt * k1_vel
-        E2 = get_interpolated_E(pos_k2)
-        k2_pos = vel_k2.copy()
-        k2_vel = q_over_m * (E2 + np.cross(vel_k2, B_field))
-        
-        # --- RK4 Step 3 ---
-        pos_k3 = pos + 0.5 * dt * k2_pos
-        vel_k3 = vel + 0.5 * dt * k2_vel
-        E3 = get_interpolated_E(pos_k3)
-        k3_pos = vel_k3.copy()
-        k3_vel = q_over_m * (E3 + np.cross(vel_k3, B_field))
-        
-        # --- RK4 Step 4 ---
-        pos_k4 = pos + dt * k3_pos
-        vel_k4 = vel + dt * k3_vel
-        E4 = get_interpolated_E(pos_k4)
-        k4_pos = vel_k4.copy()
-        k4_vel = q_over_m * (E4 + np.cross(vel_k4, B_field))
-        
-        # --- Unified Accumulation Step ---
-        pos += (dt / 6.0) * (k1_pos + 2.0 * k2_pos + 2.0 * k3_pos + k4_pos)
-        vel += (dt / 6.0) * (k1_vel + 2.0 * k2_vel + 2.0 * k3_vel + k4_vel)
-        
-    return np.array(trajectory)
+            is_inverted = det_J_min <= 0.0
 
-def plot_journal_visualization(trajectories, cached_meshes, ground_truth):
-    """Generates comparative plots showing genuine grid-induced path drift with microinsets."""
-    plt.style.use("dark_background")
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6), facecolor="#0B0F19")
-    colors = ["#00FFCC", "#FF0055", "#38BDF8"]
-    titles = ["(a) Pure 3D TCR Engine", "(b) Hybrid TDP System", "(c) Pure Laplace PDE"]
+            # 2. Element Condition Number: kappa(J) = ||J||_F * ||J^-1||_F / 3
+            if abs(det_J_center) > 1e-12:
+                inv_J = np.linalg.inv(J_center)
+                norm_J = np.linalg.norm(J_center, 'fro')
+                norm_inv_J = np.linalg.norm(inv_J, 'fro')
+                cond_num = (norm_J * norm_inv_J) / 3.0
+            else:
+                cond_num = 1e6
+
+            # 3. Aspect Ratio: L_max / L_min
+            edges = [
+                pts[1]-pts[0], pts[2]-pts[1], pts[3]-pts[2], pts[0]-pts[3],
+                pts[5]-pts[4], pts[6]-pts[5], pts[7]-pts[6], pts[4]-pts[7],
+                pts[4]-pts[0], pts[5]-pts[1], pts[6]-pts[2], pts[7]-pts[3]
+            ]
+            edge_lens = [np.linalg.norm(e) for e in edges]
+            aspect_ratio = max(edge_lens) / max(1e-12, min(edge_lens))
+
+            
+            v_xi, v_eta, v_zeta = J_center[0, :], J_center[1, :], J_center[2, :]
+            norm_xi, norm_eta, norm_zeta = np.linalg.norm(v_xi), np.linalg.norm(v_eta), np.linalg.norm(v_zeta)
+
+            def get_angle_error(v1, v2, n1, n2):
+                if n1 * n2 > 1e-12:
+                    cos_val = abs(np.dot(v1, v2) / (n1 * n2))
+                    return np.arcsin(np.clip(cos_val, 0.0, 1.0)) * (180.0 / np.pi)
+                return 90.0
+
+            err_xi_eta = get_angle_error(v_xi, v_eta, norm_xi, norm_eta)
+            err_eta_zeta = get_angle_error(v_eta, v_zeta, norm_eta, norm_zeta)
+            err_zeta_xi = get_angle_error(v_zeta, v_xi, norm_zeta, norm_xi)
+
+            max_ortho_error = max(err_xi_eta, err_eta_zeta, err_zeta_xi)
+            skewness = max_ortho_error / 90.0
+
+            
+            is_pole = (j_idx == 0) or (j_idx == self.num_theta - 2)
+            is_equator = abs(j_idx - (self.num_theta // 2)) <= 1
+            is_seam = (k_idx == 0) or (k_idx == self.num_phi - 1)
+
+            region_tag = "Interior"
+            if is_pole:
+                region_tag = "Pole"
+            elif is_equator:
+                region_tag = "Equator"
+            if is_seam:
+                region_tag += "+Seam" if region_tag != "Interior" else "Seam"
+
+            center_pos = np.mean(pts, axis=0)
+
+            record = {
+                "elem_id": elem_id,
+                "grid_idx_i_j_k": f"{i_idx}_{j_idx}_{k_idx}",
+                "region": region_tag,
+                "center_x": center_pos[0],
+                "center_y": center_pos[1],
+                "center_z": center_pos[2],
+                "det_J_min": det_J_min,
+                "det_J_center": det_J_center,
+                "aspect_ratio": aspect_ratio,
+                "skewness": skewness,
+                "cond_number": cond_num,
+                "ortho_err_xi_eta_deg": err_xi_eta,
+                "ortho_err_eta_zeta_deg": err_eta_zeta,
+                "ortho_err_zeta_xi_deg": err_zeta_xi,
+                "max_ortho_err_deg": max_ortho_error,
+                "is_inverted": is_inverted
+            }
+
+            metrics.append(record)
+            if is_inverted:
+                inverted_list.append(record)
+
+        return metrics, inverted_list
+
+
+
+
+class Mesh3DVisualizer:
     
-    for idx, name in enumerate(cached_meshes.keys()):
-        ax = axes[idx]
-        ax.set_facecolor("#0B0F19")
-        mesh_data = cached_meshes[name]
-        traj_grid = trajectories[name]
-        
-        if mesh_data:
-            grid_shape = mesh_data["grid_shape"]
-            X, Y = np.zeros(grid_shape), np.zeros(grid_shape)
-            for n in mesh_data["vertices"]:
-                i, j, k = n["index"]
-                X[i, j, k], Y[i, j, k] = n["pos"][0], n["pos"][1]
-            for i in range(grid_shape[0]): ax.plot(X[i, :, 0], Y[i, :, 0], color="#1E293B", alpha=0.25, linewidth=0.5)
-            for j in range(grid_shape[1]): ax.plot(X[:, j, 0], Y[:, j, 0], color="#1E293B", alpha=0.25, linewidth=0.5)
-                
-        ax.plot(ground_truth[:, 0], ground_truth[:, 1], color="#64748B", linestyle="--", linewidth=1.2, label="Ground Truth")
-        ax.plot(traj_grid[:, 0], traj_grid[:, 1], color=colors[idx], linewidth=1.8, label="Grid-Resolved Path")
-        ax.scatter(traj_grid[0,0], traj_grid[0,1], color="#FFFFFF", s=25, zorder=5)
-        
-        ax.set_title(titles[idx], color="#FFFFFF", fontsize=11, fontweight="bold", pad=8)
-        ax.axis("equal")
-        ax.set_xlim([-4.5, 4.5])
-        ax.set_ylim([-4.5, 4.5])
-        ax.grid(True, color="#1E293B", linestyle=":", linewidth=0.5)
-        
-        ax_inset = ax.inset_axes([0.05, 0.05, 0.38, 0.38], facecolor="#0F172A")
-        if mesh_data:
-            for i in range(grid_shape[0]): ax_inset.plot(X[i, :, 0], Y[i, :, 0], color="#475569", alpha=0.3, linewidth=0.4)
-            for j in range(grid_shape[1]): ax_inset.plot(X[:, j, 0], Y[:, j, 0], color="#475569", alpha=0.3, linewidth=0.4)
-        ax_inset.plot(ground_truth[:, 0], ground_truth[:, 1], color="#64748B", linestyle="--", linewidth=1.0)
-        ax_inset.plot(traj_grid[:, 0], traj_grid[:, 1], color=colors[idx], linewidth=1.5)
-        ax_inset.set_xlim([-0.6, 0.6])
-        ax_inset.set_ylim([-0.6, 0.6])
-        ax_inset.axis("equal")
-        ax_inset.get_xaxis().set_visible(False)
-        ax_inset.get_yaxis().set_visible(False)
-        for s in ax_inset.spines.values(): s.set_edgecolor(colors[idx])
-        ax.indicate_inset_zoom(ax_inset, edgecolor="#64748B", alpha=0.2, linewidth=0.5)
-        ax.legend(loc="upper right", frameon=True, facecolor="#0B0F19", edgecolor="#334155", fontsize=8)
 
-    plt.suptitle("CONFORMAL PHYSICS-GEOMETRIC TRAJECTORY QUANTIZATION COMPARISON\n"
-                 "True Grid-Interpolated Trajectories with Core Singularity Zoom-In Insets", color="#FFFFFF", fontsize=13, fontweight="bold", y=0.98)
+    def __init__(self, evaluator):
+        self.evaluator = evaluator
+        self.nodes = evaluator.nodes
+        self.elements = evaluator.elements
+        self.num_r, self.num_theta, self.num_phi = evaluator.grid_shape
+
+    def render_and_save_3d_mesh(self, inverted_list, save_filename):
+        
+        fig = plt.figure(figsize=(10, 8), dpi=300)
+        ax = fig.add_subplot(111, projection='3d')
+
+       
+        step_r = max(1, self.num_r // 8)
+        step_phi = max(1, self.num_phi // 16)
+
+        
+        for i in range(0, self.num_r, step_r):
+            grid_layer = self.nodes.reshape((self.num_r, self.num_theta, self.num_phi, 3))[i, :, :, :]
+            for k in range(0, self.num_phi, step_phi):
+                ax.plot(grid_layer[:, k, 0], grid_layer[:, k, 1], grid_layer[:, k, 2], 
+                        color='navy', alpha=0.15, linewidth=0.5)
+
+        
+        if inverted_list:
+            inv_x = [m["center_x"] for m in inverted_list]
+            inv_y = [m["center_y"] for m in inverted_list]
+            inv_z = [m["center_z"] for m in inverted_list]
+
+            ax.scatter(inv_x, inv_y, inv_z, color='crimson', s=25, alpha=0.85, 
+                       edgecolor='black', linewidth=0.5, 
+                       label=f'Inverted Elements ({len(inverted_list)})')
+        else:
+            ax.text2D(0.05, 0.95, "✅ Zero Inverted Elements", transform=ax.transAxes, 
+                      color='darkgreen', fontsize=11, fontweight='bold')
+
+        
+        ax.set_title(f"3D Mesh Manifold & Topology Diagnostics\n[{self.evaluator.filename}]", fontsize=11, fontweight='bold')
+        ax.set_xlabel("X Axis")
+        ax.set_ylabel("Y Axis")
+        ax.set_zlabel("Z Axis")
+        ax.legend(loc="upper right", fontsize=9)
+        
+        
+        max_range = np.array([
+            self.nodes[:, 0].max() - self.nodes[:, 0].min(),
+            self.nodes[:, 1].max() - self.nodes[:, 1].min(),
+            self.nodes[:, 2].max() - self.nodes[:, 2].min()
+        ]).max() / 2.0
+
+        mid_x = (self.nodes[:, 0].max() + self.nodes[:, 0].min()) * 0.5
+        mid_y = (self.nodes[:, 1].max() + self.nodes[:, 1].min()) * 0.5
+        mid_z = (self.nodes[:, 2].max() + self.nodes[:, 2].min()) * 0.5
+
+        ax.set_xlim(mid_x - max_range, mid_x + max_range)
+        ax.set_ylim(mid_y - max_range, mid_y + max_range)
+        ax.set_zlim(mid_z - max_range, mid_z + max_range)
+
+        out_path = os.path.join(VIS_DIR, save_filename)
+        plt.tight_layout()
+        plt.savefig(out_path, dpi=300)
+        plt.close()
+
+        print(f"  └─ [🎨 3D MESH RENDERED] Saved 3D visualization plot as '{out_path}'")
+
+
+# ==============================================================================
+#  REPORT GENERATION & CSV PIPELINE
+# ==============================================================================
+
+def run_mesh_quality_suite():
+    print("=" * 110)
+    print("   EXPLICIT MESH QUALITY, INVERTED ELEMENT & 3D MESH VISUALIZATION SUITE")
+    print("=" * 110)
+
+    mesh_files = [f for f in os.listdir(MESH_DIR) if f.endswith(".json")]
+    if not mesh_files:
+        print(f"[❌ ERROR] No JSON mesh files found in '{MESH_DIR}'. Please run fem_poisson_solver.py first.")
+        return
+
+    summary_rows = []
+
+    for mfile in sorted(mesh_files):
+        fpath = os.path.join(MESH_DIR, mfile)
+        evaluator = Hex8QualityEvaluator(fpath)
+        metrics, inverted_list = evaluator.evaluate_mesh()
+
+        base_name = os.path.splitext(mfile)[0]
+
+        
+        csv_raw_path = os.path.join(REPORT_DIR, f"{base_name}_raw_metrics.csv")
+        with open(csv_raw_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=metrics[0].keys())
+            writer.writeheader()
+            writer.writerows(metrics)
+
+        
+        csv_inv_path = os.path.join(REPORT_DIR, f"{base_name}_INVERTED_ELEMENTS.csv")
+        with open(csv_inv_path, "w", newline="", encoding="utf-8") as f:
+            if inverted_list:
+                writer = csv.DictWriter(f, fieldnames=inverted_list[0].keys())
+                writer.writeheader()
+                writer.writerows(inverted_list)
+            else:
+                f.write("No inverted elements detected in this mesh. Topology is perfectly healthy.\n")
+
+        
+        visualizer = Mesh3DVisualizer(evaluator)
+        vis_png_name = f"{base_name}_3d_manifold.png"
+        visualizer.render_and_save_3d_mesh(inverted_list, vis_png_name)
+
+        
+        poles_metrics = [m for m in metrics if "Pole" in m["region"]]
+        equator_metrics = [m for m in metrics if "Equator" in m["region"]]
+        seam_metrics = [m for m in metrics if "Seam" in m["region"]]
+
+        def max_metric(arr, key):
+            return max([m[key] for m in arr]) if arr else 0.0
+
+        total_elems = len(metrics)
+        num_inv = len(inverted_list)
+        inv_ratio = (num_inv / total_elems) * 100.0
+
+        summary = {
+            "mesh_file": mfile,
+            "total_elems": total_elems,
+            "inverted_count": num_inv,
+            "inverted_ratio_pct": inv_ratio,
+            "max_aspect_ratio": max_metric(metrics, "aspect_ratio"),
+            "max_skewness": max_metric(metrics, "skewness"),
+            "max_cond_number": max_metric(metrics, "cond_number"),
+            "max_ortho_err_deg": max_metric(metrics, "max_ortho_err_deg"),
+            "pole_max_distortion": max_metric(poles_metrics, "max_ortho_err_deg"),
+            "equator_max_distortion": max_metric(equator_metrics, "max_ortho_err_deg"),
+            "seam_max_distortion": max_metric(seam_metrics, "max_ortho_err_deg")
+        }
+        summary_rows.append(summary)
+
+        print(f" Analyzed: {mfile:<28} | Inv Elems: {num_inv:4d} ({inv_ratio:5.2f}%) | "
+              f"Max AspectRatio: {summary['max_aspect_ratio']:6.2f} | Max Cond#: {summary['max_cond_number']:7.1f}")
+
+    
+    summary_csv_path = os.path.join(REPORT_DIR, "MESH_QUALITY_COMPARISON_SUMMARY.csv")
+    with open(summary_csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=summary_rows[0].keys())
+        writer.writeheader()
+        writer.writerows(summary_rows)
+
+    print(f"\n[📊 REPORTS EXPORTED] Detailed CSV reports and 3D plots generated in directory: '{REPORT_DIR}/'")
+
+    
+    plot_quality_comparison_charts(summary_rows)
+
+
+def plot_quality_comparison_charts(summary_rows):
+    
+    tcr_rows = [r for r in summary_rows if r["mesh_file"].startswith("tcr")]
+    pde_rows = [r for r in summary_rows if r["mesh_file"].startswith("pde")]
+
+    levels = [f"L{i+1}" for i in range(len(tcr_rows))]
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9), dpi=300)
+
+    
+    axes[0, 0].plot(levels, [r["inverted_ratio_pct"] for r in tcr_rows], 'o-', color='navy', label='Case A (TCR)')
+    axes[0, 0].plot(levels, [r["inverted_ratio_pct"] for r in pde_rows], 's--', color='crimson', label='Case B (PDE)')
+    axes[0, 0].set_title("Inverted Element Ratio (%)", fontweight='bold')
+    axes[0, 0].set_ylabel("Inverted Ratio (%)")
+    axes[0, 0].grid(True, linestyle="--", alpha=0.5)
+    axes[0, 0].legend()
+
+    
+    axes[0, 1].plot(levels, [r["max_cond_number"] for r in tcr_rows], 'o-', color='navy', label='Case A (TCR)')
+    axes[0, 1].plot(levels, [r["max_cond_number"] for r in pde_rows], 's--', color='crimson', label='Case B (PDE)')
+    axes[0, 1].set_title("Max Element Condition Number", fontweight='bold')
+    axes[0, 1].set_yscale('log')
+    axes[0, 1].set_ylabel("Condition Number (Log Scale)")
+    axes[0, 1].grid(True, linestyle="--", alpha=0.5)
+    axes[0, 1].legend()
+
+    
+    axes[1, 0].plot(levels, [r["max_ortho_err_deg"] for r in tcr_rows], 'o-', color='navy', label='Case A (TCR)')
+    axes[1, 0].plot(levels, [r["max_ortho_err_deg"] for r in pde_rows], 's--', color='crimson', label='Case B (PDE)')
+    axes[1, 0].set_title("Max 3D Orthogonality Error (Degrees)", fontweight='bold')
+    axes[1, 0].set_ylabel("Max Angle Error (°)")
+    axes[1, 0].grid(True, linestyle="--", alpha=0.5)
+    axes[1, 0].legend()
+
+    
+    if tcr_rows:
+        last_tcr = tcr_rows[-1]
+        regions = ['Poles', 'Equator', 'Seams']
+        distortions = [
+            last_tcr["pole_max_distortion"],
+            last_tcr["equator_max_distortion"],
+            last_tcr["seam_max_distortion"]
+        ]
+        axes[1, 1].bar(regions, distortions, color=['darkred', 'darkgreen', 'darkblue'], alpha=0.75)
+        axes[1, 1].set_title("TCR Regional Max Distortion (Max Mesh Level)", fontweight='bold')
+        axes[1, 1].set_ylabel("Max Orthogonality Error (°)")
+        axes[1, 1].grid(True, linestyle="--", alpha=0.5)
+
+    plt.suptitle("3D Mesh Quality, Topology Degradation & Regional Distortion Diagnostics", fontsize=13, fontweight='bold')
     plt.tight_layout()
-    plt.savefig("journal_trajectory_comparison.png", dpi=300, facecolor=fig.get_facecolor())
-    print("[🖼️ VISUAL] High-resolution drift comparison plot saved.")
+
+    plot_path = os.path.join(REPORT_DIR, "mesh_quality_comparison_suite.png")
+    plt.savefig(plot_path, dpi=300)
+    print(f"[📊 PLOT SAVED] Quality comparison plot saved as '{plot_path}'\n")
     plt.show()
 
-def run_evaluation_pipeline():
-    print("=" * 70)
-    print("    RUNNING CORE-FOCUSED INTERPOLATED PHYSICS VALIDATION SUITE")
-    print("=" * 70)
-    
-    cases = [
-        {"name": "Case A: Pure Analytical 3D TCR Engine", "mesh_file": "tcr_mesh_journal.json", "log_file": "tcr_final.txt", "complexity": "O(N) - Discrete Node Field Search"},
-        {"name": "Case B: Hybrid TDP System", "mesh_file": "tdp_mesh_journal.json", "log_file": "tdp_final.txt", "complexity": "O(N^3) - Iterative Source-Driven"},
-        {"name": "Case C: Pure Non-Source Laplace Elliptic PDE", "mesh_file": "pde_mesh_journal.json", "log_file": "pde_final.txt", "complexity": "O(N^3) - Homogeneous Baseline"}
-    ]
-    
-    ground_truth = solve_lorentz_trajectory(mesh_data=None, is_ground_truth=True)
-    cached_meshes, trajectories = {}, {}
-    
-    for case in cases:
-        mesh_data = load_mesh_file(case["mesh_file"])
-        cached_meshes[case["name"]] = mesh_data
-        
-        traj_grid = solve_lorentz_trajectory(mesh_data, is_ground_truth=False)
-        trajectories[case["name"]] = traj_grid
-        
-        core_drift_accum, count = 0.0, 0
-        for p_t, p_g in zip(traj_grid, ground_truth):
-            r_gt = np.linalg.norm(p_g)
-            if r_gt < 3.5:  
-                core_drift_accum += np.linalg.norm(p_t - p_g)
-                count += 1
-                
-        mean_core_drift = core_drift_accum / max(1, count)
-        fit_score = 100.0 * np.exp(-2.5 * mean_core_drift)
-        ortho_score = compute_mesh_quality_and_ortho(mesh_data)
-        
-        report_content = f"""========================================================================
-INTERNATIONAL PUBLICATION METRIC REPORT: COMPANION DATA VERIFICATION
-========================================================================
-Evaluated Framework      : {case['name']}
-Associated Cache Database: {case['mesh_file']}
-------------------------------------------------------------------------
-[METRIC 1: GEOMETRIC MESH QUALITY]
- - Mean Grid Orthogonality Score     : {ortho_score:.4f} / 100.0000 Points
- - Geometric Shear Deformation Level : {100.0 - ortho_score:.4f}%
-
-[METRIC 2: CORE PHYSICAL SINGULARITY ADAPTATION INTEGRITY (DRIFT TEST)]
- - Localized Core Trajectory Drift   : {mean_core_drift:.6f} Absolute Euclidean Error
- - Singularity Layer Resolution Score: {fit_score:.4f} / 100.0000 Points
-
-[METRIC 3: COMPUTATIONAL TIME OVERHEAD & COMPLEXITY]
- - Algorithm Computational Complexity: {case['complexity']}
-----------------------------------------------------------------========
-"""
-        with open(case["log_file"], "w", encoding="utf-8") as f: f.write(report_content)
-        print(f"[💾 EXPORTED] Report logged to '{case['log_file']}'")
-        
-    plot_journal_visualization(trajectories, cached_meshes, ground_truth)
 
 if __name__ == "__main__":
-    run_evaluation_pipeline()
+    run_mesh_quality_suite()
