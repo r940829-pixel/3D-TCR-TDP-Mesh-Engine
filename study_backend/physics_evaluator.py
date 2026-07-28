@@ -14,8 +14,8 @@ rcParams['xtick.direction'] = 'in'
 rcParams['ytick.direction'] = 'in'
 
 
-MESH_DIR = "generated_meshes(physics_evaluator.py)"
-REPORT_DIR = "quality_reports(physics_evaluator.py)"
+MESH_DIR = "generated_meshes"
+REPORT_DIR = "quality_reports"
 VIS_DIR = os.path.join(REPORT_DIR, "visualizations")
 
 os.makedirs(REPORT_DIR, exist_ok=True)
