@@ -1,7 +1,6 @@
 import json
 import warnings
 import numpy as np
-import sympy as sp
 
 # ==============================================================================
 #  BLOCK 1: INPUT & SYSTEM SPECIFICATION BLOCK
@@ -9,14 +8,6 @@ import sympy as sp
 
 def get_coupled_system_specification():
     
-    p_a, p_b, p_c = 10.0, 28.0, 8.0 / 3.0
-
-    system_equations = (
-        f"{p_a} * (y - x)",
-        f"x * ({p_b} - z) - y",
-        f"x * y - {p_c} * z"
-    )
-
     mesh_config = {
         "var_names": ('x', 'y', 'z'),
         "domain_bounds": (-10.0, 10.0),
@@ -29,12 +20,11 @@ def get_coupled_system_specification():
         "omega": 1.75,
         "output_filename": "pde_mesh_journal.json"
     }
-
-    return system_equations, mesh_config
+    return None, mesh_config
 
 
 # ==============================================================================
-#  BLOCK 2: CHAOTIC-FIELD GUIDED ELLIPTIC PDE SOLVER
+#  BLOCK 2: STANDARD ELLIPTIC PDE GRID GENERATOR (TTM METHOD)
 # ==============================================================================
 
 def generate_pure_pde_3d_mesh(
@@ -53,36 +43,19 @@ def generate_pure_pde_3d_mesh(
     grid_shape = (num_r, num_theta, num_phi)
 
     
-    if system_input is None:
-        sys_eqs, _ = get_coupled_system_specification()
-        system_input = sys_eqs
+    r_arr = np.linspace(0.1, r_val, num_r)
+    theta_arr = np.linspace(eps, np.pi - eps, num_theta)
+    phi_arr = np.linspace(0, 2 * np.pi, num_phi, endpoint=False) 
 
-    vars_sym = [sp.Symbol(name, real=True) for name in ('x', 'y', 'z')]
-    if isinstance(system_input, (list, tuple)):
-        eq_syms = [sp.sympify(eq_str, locals={'pi': np.pi}) for eq_str in system_input]
-        f_scalar_sym = sum(eq**2 for eq in eq_syms)
-    else:
-        f_scalar_sym = sp.sympify(system_input, locals={'pi': np.pi})
-
-    grad_syms = [sp.diff(f_scalar_sym, v) for v in vars_sym]
-    grad_norm_sq_sym = sum(g**2 for g in grad_syms)
-    
-    f_eval = sp.lambdify(vars_sym, f_scalar_sym, modules=['numpy'])
-    grad_norm_eval = sp.lambdify(vars_sym, sp.sqrt(grad_norm_sq_sym), modules=['numpy'])
+    dr = r_arr[1] - r_arr[0]
+    dth = theta_arr[1] - theta_arr[0]
+    dph = phi_arr[1] - phi_arr[0]
 
     
-    xi = np.linspace(0.1, r_val, num_r)
-    theta = np.linspace(eps, np.pi - eps, num_theta)
-    phi = np.linspace(0, 2 * np.pi, num_phi, endpoint=False) 
-
-    d_r = (xi[-1] - xi[0]) / (num_r - 1)
-    d_theta = (theta[-1] - theta[0]) / (num_theta - 1)
-    d_phi = 2 * np.pi / num_phi  
-
-    w_r = 1.0 / (d_r ** 2)
-    w_theta = 1.0 / (d_theta ** 2)
-    w_phi = 1.0 / (d_phi ** 2)
-    denom = 2.0 * (w_r + w_theta + w_phi)
+    w_r = 1.0 / (dr ** 2)
+    w_th = 1.0 / (dth ** 2)
+    w_ph = 1.0 / (dph ** 2)
+    denom = 2.0 * (w_r + w_th + w_ph)
 
     X = np.zeros(grid_shape, dtype=np.float64)
     Y = np.zeros(grid_shape, dtype=np.float64)
@@ -92,27 +65,29 @@ def generate_pure_pde_3d_mesh(
     for j in range(num_theta):
         for k in range(num_phi):
             
-            X[0, j, k] = xi[0] * np.sin(theta[j]) * np.cos(phi[k])
-            Y[0, j, k] = xi[0] * np.sin(theta[j]) * np.sin(phi[k])
-            Z[0, j, k] = xi[0] * np.cos(theta[j])
+            X[0, j, k] = r_arr[0] * np.sin(theta_arr[j]) * np.cos(phi_arr[k])
+            Y[0, j, k] = r_arr[0] * np.sin(theta_arr[j]) * np.sin(phi_arr[k])
+            Z[0, j, k] = r_arr[0] * np.cos(theta_arr[j])
 
-            X[-1, j, k] = xi[-1] * np.sin(theta[j]) * np.cos(phi[k])
-            Y[-1, j, k] = xi[-1] * np.sin(theta[j]) * np.sin(phi[k])
-            Z[-1, j, k] = xi[-1] * np.cos(theta[j])
+            
+            X[-1, j, k] = r_arr[-1] * np.sin(theta_arr[j]) * np.cos(phi_arr[k])
+            Y[-1, j, k] = r_arr[-1] * np.sin(theta_arr[j]) * np.sin(phi_arr[k])
+            Z[-1, j, k] = r_arr[-1] * np.cos(theta_arr[j])
 
     for i in range(1, num_r - 1):
         for k in range(num_phi):
-            X[i, 0, k] = xi[i] * np.sin(theta[0]) * np.cos(phi[k])
-            Y[i, 0, k] = xi[i] * np.sin(theta[0]) * np.sin(phi[k])
-            Z[i, 0, k] = xi[i] * np.cos(theta[0])
+            
+            X[i, 0, k] = r_arr[i] * np.sin(theta_arr[0]) * np.cos(phi_arr[k])
+            Y[i, 0, k] = r_arr[i] * np.sin(theta_arr[0]) * np.sin(phi_arr[k])
+            Z[i, 0, k] = r_arr[i] * np.cos(theta_arr[0])
 
-            X[i, -1, k] = xi[i] * np.sin(theta[-1]) * np.cos(phi[k])
-            Y[i, -1, k] = xi[i] * np.sin(theta[-1]) * np.sin(phi[k])
-            Z[i, -1, k] = xi[i] * np.cos(theta[-1])
+            X[i, -1, k] = r_arr[i] * np.sin(theta_arr[-1]) * np.cos(phi_arr[k])
+            Y[i, -1, k] = r_arr[i] * np.sin(theta_arr[-1]) * np.sin(phi_arr[k])
+            Z[i, -1, k] = r_arr[i] * np.cos(theta_arr[-1])
 
     
     for i in range(1, num_r - 1):
-        factor = (xi[i] - xi[0]) / (xi[-1] - xi[0])
+        factor = (r_arr[i] - r_arr[0]) / (r_arr[-1] - r_arr[0])
         for j in range(1, num_theta - 1):
             for k in range(num_phi):
                 X[i, j, k] = (1.0 - factor) * X[0, j, k] + factor * X[-1, j, k]
@@ -123,8 +98,8 @@ def generate_pure_pde_3d_mesh(
     residual_history = []
     converged = False
 
-    print(f"[⚙️ PDE SOLVER] Starting Chaotic-Guided SOR Solver (Tol={tol:.1e}, Max_Iter={max_iter})...")
-    print(f"[⚙️ METRIC WEIGHTS] w_r={w_r:.3e}, w_theta={w_theta:.3e}, w_phi={w_phi:.3e}")
+    print(f"[⚙️ STANDARD PDE] Starting Standard Elliptic TTM SOR Solver (Tol={tol:.1e}, Max_Iter={max_iter})...")
+    print(f"[⚙️ METRIC WEIGHTS] w_r={w_r:.3e}, w_theta={w_th:.3e}, w_phi={w_ph:.3e}")
 
     for iteration in range(1, max_iter + 1):
         max_diff = 0.0
@@ -132,21 +107,20 @@ def generate_pure_pde_3d_mesh(
         for i in range(1, num_r - 1):
             for j in range(1, num_theta - 1):
                 for k in range(num_phi):
-                    k_prev = (k - 1) % num_phi
+                    k_prev = (k - 1) % num_phi  
                     k_next = (k + 1) % num_phi
 
-                    
                     x_lap = (w_r * (X[i+1, j, k] + X[i-1, j, k]) +
-                             w_theta * (X[i, j+1, k] + X[i, j-1, k]) +
-                             w_phi * (X[i, j, k_next] + X[i, j, k_prev])) / denom
+                             w_th * (X[i, j+1, k] + X[i, j-1, k]) +
+                             w_ph * (X[i, j, k_next] + X[i, j, k_prev])) / denom
 
                     y_lap = (w_r * (Y[i+1, j, k] + Y[i-1, j, k]) +
-                             w_theta * (Y[i, j+1, k] + Y[i, j-1, k]) +
-                             w_phi * (Y[i, j, k_next] + Y[i, j, k_prev])) / denom
+                             w_th * (Y[i, j+1, k] + Y[i, j-1, k]) +
+                             w_ph * (Y[i, j, k_next] + Y[i, j, k_prev])) / denom
 
                     z_lap = (w_r * (Z[i+1, j, k] + Z[i-1, j, k]) +
-                             w_theta * (Z[i, j+1, k] + Z[i, j-1, k]) +
-                             w_phi * (Z[i, j, k_next] + Z[i, j, k_prev])) / denom
+                             w_th * (Z[i, j+1, k] + Z[i, j-1, k]) +
+                             w_ph * (Z[i, j, k_next] + Z[i, j, k_prev])) / denom
 
                     diff_x = omega * (x_lap - X[i, j, k])
                     diff_y = omega * (y_lap - Y[i, j, k])
@@ -162,10 +136,10 @@ def generate_pure_pde_3d_mesh(
 
         if max_diff < tol:
             converged = True
-            print(f"[⚙️ PDE SOLVER] SUCCESS: Converged at iteration {iteration} with residual {max_diff:.4e}")
+            print(f"[⚙️ STANDARD PDE] SUCCESS: Converged at iteration {iteration} with residual {max_diff:.4e}")
             break
 
-   
+    
     if not converged:
         warn_msg = (
             f"[⚠️ PDE SOLVER FAILED] Reached max_iter ({max_iter}) without converging to tol ({tol:.1e}). "
@@ -174,6 +148,7 @@ def generate_pure_pde_3d_mesh(
         warnings.warn(warn_msg, RuntimeWarning)
         print(warn_msg)
 
+    
     vertices = []
     for i in range(num_r):
         for j in range(num_theta):
@@ -185,13 +160,13 @@ def generate_pure_pde_3d_mesh(
 
     mesh_data = {
         "metadata": {
-            "solver": "Chaotic-Guided Pure Elliptic PDE (Laplace-SOR)",
+            "solver": "Standard Elliptic Grid Generator (TTM Laplace-SOR)",
             "converged": converged,
             "final_iteration": len(residual_history),
             "tolerance": tol,
             "max_iterations": max_iter,
             "omega": omega,
-            "metric_steps": {"d_r": d_r, "d_theta": d_theta, "d_phi": d_phi}
+            "metric_steps": {"d_r": dr, "d_theta": dth, "d_phi": dph}
         },
         "grid_shape": list(grid_shape),
         "residual_history": residual_history,
@@ -201,7 +176,7 @@ def generate_pure_pde_3d_mesh(
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(mesh_data, f, indent=4)
 
-    print(f"[⚙️ PDE CORE] Mesh output written to {filename}")
+    print(f"[⚙️ PDE CORE] Standard mesh output written to {filename}")
     return mesh_data
 
 
@@ -210,7 +185,7 @@ def generate_pure_pde_3d_mesh(
 # ==============================================================================
 
 if __name__ == "__main__":
-    sys_eqs, sys_config = get_coupled_system_specification()
+    _, sys_config = get_coupled_system_specification()
     generate_pure_pde_3d_mesh(
         r_val=sys_config["r_val"], 
         num_r=sys_config["num_r"], 
@@ -218,6 +193,5 @@ if __name__ == "__main__":
         num_phi=sys_config["num_phi"], 
         max_iter=sys_config["max_iter"],
         tol=sys_config["tol"],
-        filename=sys_config["output_filename"],
-        system_input=sys_eqs
+        filename=sys_config["output_filename"]
     )
