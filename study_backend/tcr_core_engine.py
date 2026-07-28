@@ -99,20 +99,24 @@ def execute_tcr_manifold_engine(system_input, config):
     for i in range(num_r):
         n_t = n_vals[i]
         theta_center = theta_vals[i]
-        theta_local = np.linspace(1e-3, (np.pi / 2.0) - 1e-3, num_theta_pts) * (theta_center / (np.pi / 4.0))
+        
+        
+        t_min, t_max = 1e-3, (np.pi / 2.0) - 1e-3
+        scale_factor = theta_center / (np.pi / 4.0)
+        
+        
+        upper_bound = min(t_max, t_max * scale_factor)
+        theta_local = np.linspace(t_min, upper_bound, num_theta_pts)
 
         for j, theta in enumerate(theta_local):
-            theta_clamped = np.clip(theta, 1e-3, (np.pi / 2.0) - 1e-3)
-
-            cot_theta = np.abs(1.0 / np.tan(theta_clamped))
-            tan_theta = np.abs(np.tan(theta_clamped))
+            cot_theta = np.abs(1.0 / np.tan(theta))
+            tan_theta = np.abs(np.tan(theta))
 
             base_xy = np.sqrt(cot_theta * n_t)
-            z_sign = np.sign((np.pi / 2.0) - theta_clamped)
+            z_sign = np.sign((np.pi / 2.0) - theta)
             z_val = z_sign * np.sqrt(tan_theta * n_t)
 
             for k, phi in enumerate(phi_arr):
-
                 x_val = np.cos(phi) * base_xy
                 y_val = np.sin(phi) * base_xy
 
