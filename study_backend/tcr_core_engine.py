@@ -20,11 +20,12 @@ def get_coupled_system_specification():
     mesh_config = {
         "var_names": ('x', 'y', 'z'),
         "domain_bounds": (-10.0, 10.0),
-        "num_r": 80,                     
+        "num_r": 80,                    
         "num_theta_pts": 30,             
         "num_phi": 40,                   
         "tol": 1e-5,                     
         "max_iter": 600,                 
+        "lambda_scale": 0.1,             
         "output_filename": "tcr_mesh_journal.json"
     }
 
@@ -32,7 +33,7 @@ def get_coupled_system_specification():
 
 
 # ==============================================================================
-#  BLOCK 2: CORE TCR ALGORITHM ENGINE BLOCK (WITH ARCTAN SMOOTH MAPPING)
+#  BLOCK 2: CORE TCR ENGINE (MONGE SURFACE AREA INTEGRATION)
 # ==============================================================================
 
 def execute_tcr_manifold_engine(system_input, config):
@@ -44,6 +45,7 @@ def execute_tcr_manifold_engine(system_input, config):
     num_phi = config["num_phi"]
     tol = config.get("tol", 1e-5)
     max_iter = config.get("max_iter", 600)
+    lambda_scale = config.get("lambda_scale", 0.1)
 
     
     vars_sym = [sp.Symbol(name, real=True) for name in var_names]
@@ -58,46 +60,42 @@ def execute_tcr_manifold_engine(system_input, config):
     grad_norm_sq_sym = sum(g**2 for g in grad_syms)
     laplacian_sym = sum(sp.diff(f_scalar_sym, v, 2) for v in vars_sym)
 
-    f_eval = sp.lambdify(vars_sym, f_scalar_sym, modules=['numpy'])
     grad_norm_eval = sp.lambdify(vars_sym, sp.sqrt(grad_norm_sq_sym), modules=['numpy'])
     laplacian_eval = sp.lambdify(vars_sym, laplacian_sym, modules=['numpy'])
 
     
     r_arr = np.linspace(0.1, domain_bounds[1], num_r)
+    dr = r_arr[1] - r_arr[0]
     phi_arr = np.linspace(0, 2 * np.pi, num_phi, endpoint=False)
 
-    n_vals = []
+    area_weights = []
     theta_vals = []
 
     for r in r_arr:
         x_s, y_s, z_s = r / np.sqrt(3), r / np.sqrt(3), r / np.sqrt(3)
         
-        f_val = float(f_eval(x_s, y_s, z_s))
         grad_val = float(grad_norm_eval(x_s, y_s, z_s))  
         lap_val = float(laplacian_eval(x_s, y_s, z_s))    
 
-        s1 = np.sign(lap_val)  
-        s2 = np.sign(grad_val - 1.0)
-
-        
-        if s1 > 0 and s2 > 0:
-            region_weight = 1.25
-        elif s1 > 0 and s2 < 0:
-            region_weight = 0.85
-        elif s1 == 0 or abs(grad_val) < 1e-3:
-            region_weight = 1.00
-        elif s1 < 0 and s2 > 0:
-            region_weight = 1.40
-        else:
-            region_weight = 0.60
-
-        n_f = np.abs(0.5 * (f_val**2)) * region_weight
-        n_vals.append(n_f)
+        #  w(x) = sqrt(1 + ||∇f||^2 + λ|Δf|)
+        w_density = np.sqrt(1.0 + grad_val**2 + lambda_scale * np.abs(lap_val))
+        area_weights.append(w_density)
 
         
         rho_arctan = (2.0 / np.pi) * np.arctan(lap_val / (grad_val + 1.0))
         theta_val = (np.pi / 4.0) + (np.pi / 8.0) * rho_arctan
         theta_vals.append(theta_val)
+
+    # n(r_i) = ∫ w(ρ) dρ
+    n_vals = []
+    accumulated_area = 0.0
+    n_vals.append(area_weights[0] * dr)
+
+    for i in range(1, num_r):
+    
+        trapezoidal_item = 0.5 * (area_weights[i] + area_weights[i-1]) * dr
+        accumulated_area += trapezoidal_item
+        n_vals.append(accumulated_area)
 
     
     vertices = []
@@ -108,7 +106,6 @@ def execute_tcr_manifold_engine(system_input, config):
     for i in range(num_r):
         n_t = n_vals[i]
         theta_center = theta_vals[i]
-        
         
         t_min = max(0.05, theta_center - np.pi / 6.0)
         t_max = min(np.pi / 2.0 - 0.05, theta_center + np.pi / 6.0)
@@ -156,8 +153,8 @@ def execute_tcr_manifold_engine(system_input, config):
 
     return {
         "metadata": {
-            "solver": "Multivariate Field-Driven TCR Engine",
-            "option": "Smooth Arctan Dimensionless Ratio Mapping",
+            "solver": "Multivariate Monge-Area Driven TCR Engine",
+            "option": "Monge Surface Area Element Trapezoidal Integration",
             "converged": converged,
             "final_iteration": len(residual_history),
             "tolerance": tol,
@@ -183,13 +180,13 @@ def export_mesh_database(mesh_data, filename):
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("   MULTIVARIATE FIELD-DRDriven TCR MESH GENERATION PIPELINE")
+    print("   MONGE SURFACE AREA INTEGRAL TCR MESH GENERATION PIPELINE")
     print("=" * 70)
 
     sys_eqs, sys_config = get_coupled_system_specification()
     print(f"[Block 1: Input Loaded] Coupled System Defined.")
 
-    print(f"[Block 2: Engine Processing] Executing Arctan Smooth TCR Engine...")
+    print(f"[Block 2: Engine Processing] Executing Monge Area Integration Engine...")
     mesh_results = execute_tcr_manifold_engine(sys_eqs, sys_config)
 
     out_file = sys_config["output_filename"]
