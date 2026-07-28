@@ -111,8 +111,12 @@ def generate_tdp_3d_mesh(system_input, tdp_config):
             break
 
     if not converged:
+        warning_msg = (
+            f"[⚠️ TDP-3D SOLVER FAILED] Reached max iteration ({max_iter}) "
+            f"without converging to tol ({tol:.1e}). Final residual: {max_res:.4e}"
+        )
+        warnings.warn(warning_msg, RuntimeWarning)
         print(f"[⚠️ TDP-3D SOLVER] Reached max iteration ({max_iter}) with final residual {max_res:.4e}")
-
     
     vertices = []
     grid_shape = [num_r, num_theta, num_phi]
