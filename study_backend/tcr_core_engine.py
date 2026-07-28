@@ -7,7 +7,7 @@ import sympy as sp
 # ==============================================================================
 
 def get_coupled_system_specification():
-    
+
     p_a, p_b, p_c = 10.0, 28.0, 8.0 / 3.0
 
     system_equations = (
@@ -20,7 +20,7 @@ def get_coupled_system_specification():
         "var_names": ('x', 'y', 'z'),
         "domain_bounds": (-10.0, 10.0),
         "num_r": 80,                     
-        "num_theta_pts": 30,            
+        "num_theta_pts": 30,             
         "num_phi": 40,                   
         "output_filename": "tcr_mesh_journal.json"
     }
@@ -40,6 +40,7 @@ def execute_tcr_manifold_engine(system_input, config):
     num_theta_pts = config["num_theta_pts"]
     num_phi = config["num_phi"]
 
+    
     vars_sym = [sp.Symbol(name, real=True) for name in var_names]
 
     if isinstance(system_input, (list, tuple)):
@@ -56,8 +57,10 @@ def execute_tcr_manifold_engine(system_input, config):
     grad_norm_eval = sp.lambdify(vars_sym, sp.sqrt(grad_norm_sq_sym), modules=['numpy'])
     laplacian_eval = sp.lambdify(vars_sym, laplacian_sym, modules=['numpy'])
 
+    
     r_arr = np.linspace(0.1, domain_bounds[1], num_r)
-    phi_arr = np.linspace(0, 2 * np.pi, num_phi)
+    
+    phi_arr = np.linspace(0, 2 * np.pi, num_phi, endpoint=False)
 
     n_vals = []
     theta_vals = []
@@ -72,6 +75,7 @@ def execute_tcr_manifold_engine(system_input, config):
         s1 = np.sign(lap_val)  
         s2 = np.sign(grad_val - 1.0)
 
+        
         if s1 > 0 and s2 > 0:
             region_weight = 1.25
         elif s1 > 0 and s2 < 0:
@@ -88,11 +92,10 @@ def execute_tcr_manifold_engine(system_input, config):
 
         
         rho = lap_val / (np.sqrt(grad_val**2 + lap_val**2) + 1e-6)
-        
-
         theta_val = (np.pi / 4.0) + (np.pi / 8.0) * rho
         theta_vals.append(theta_val)
 
+   
     vertices = []
     grid_shape = (num_r, num_theta_pts, num_phi)
 
@@ -103,8 +106,6 @@ def execute_tcr_manifold_engine(system_input, config):
         
         t_min, t_max = 1e-3, (np.pi / 2.0) - 1e-3
         scale_factor = theta_center / (np.pi / 4.0)
-        
-        
         upper_bound = min(t_max, t_max * scale_factor)
         theta_local = np.linspace(t_min, upper_bound, num_theta_pts)
 
@@ -125,7 +126,16 @@ def execute_tcr_manifold_engine(system_input, config):
                     "pos": [float(x_val), float(y_val), float(z_val)]
                 })
 
-    return {"grid_shape": list(grid_shape), "vertices": vertices}
+    return {
+        "metadata": {
+            "generator": "Multivariate Field-Driven TCR Engine",
+            "option": "Dimensionless Ratio Mapping (Option 2)",
+            "bounds": config["domain_bounds"],
+            "resolution": list(grid_shape)
+        },
+        "grid_shape": list(grid_shape), 
+        "vertices": vertices
+    }
 
 
 # ==============================================================================
@@ -133,7 +143,7 @@ def execute_tcr_manifold_engine(system_input, config):
 # ==============================================================================
 
 def export_mesh_database(mesh_data, filename):
-
+    
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(mesh_data, f, indent=4)
     return len(mesh_data["vertices"])
@@ -143,15 +153,15 @@ if __name__ == "__main__":
     print("   MULTIVARIATE FIELD-DRIVEN TCR MESH GENERATION PIPELINE")
     print("=" * 70)
 
-
+    
     sys_eqs, sys_config = get_coupled_system_specification()
     print(f"[Block 1: Input Loaded] Coupled System Defined.")
 
-
+    
     print(f"[Block 2: Engine Processing] Executing TCR Option 2 Algorithm...")
     mesh_results = execute_tcr_manifold_engine(sys_eqs, sys_config)
 
-
+    
     out_file = sys_config["output_filename"]
     total_nodes = export_mesh_database(mesh_results, out_file)
     
