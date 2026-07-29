@@ -6,15 +6,13 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib import rcParams
 
-
 rcParams['font.family'] = 'serif'
 rcParams['mathtext.fontset'] = 'cm'
 rcParams['axes.linewidth'] = 1.0
 rcParams['xtick.direction'] = 'in'
 rcParams['ytick.direction'] = 'in'
 
-
-MESH_DIR = "generated_meshes"
+MESH_DIR = "generated_meshes"  
 REPORT_DIR = "quality_reports"
 VIS_DIR = os.path.join(REPORT_DIR, "visualizations")
 
@@ -23,7 +21,6 @@ os.makedirs(VIS_DIR, exist_ok=True)
 
 
 class Hex8QualityEvaluator:
-    
 
     def __init__(self, json_filepath):
         self.filepath = json_filepath
@@ -31,14 +28,13 @@ class Hex8QualityEvaluator:
         with open(json_filepath, "r", encoding="utf-8") as f:
             self.data = json.load(f)
 
-        self.grid_shape = self.data["grid_shape"]  # (num_r, num_theta, num_phi)
+        self.grid_shape = self.data["grid_shape"]
         self.num_r, self.num_theta, self.num_phi = self.grid_shape
         self.vertices = self.data["vertices"]
 
         self._build_mesh_topology()
 
     def _build_mesh_topology(self):
-       
         self.nodes = np.zeros((len(self.vertices), 3), dtype=np.float64)
         node_map = {}
 
@@ -73,7 +69,6 @@ class Hex8QualityEvaluator:
 
     @staticmethod
     def _hex8_shape_derivatives(xi, eta, zeta):
-        
         return 0.125 * np.array([
             [-(1-eta)*(1-zeta),  (1-eta)*(1-zeta),  (1+eta)*(1-zeta), -(1+eta)*(1-zeta),
              -(1-eta)*(1+zeta),  (1-eta)*(1+zeta),  (1+eta)*(1+zeta), -(1+eta)*(1+zeta)],
@@ -84,7 +79,6 @@ class Hex8QualityEvaluator:
         ])
 
     def evaluate_mesh(self):
-        
         g_pts = [-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0)]
         gauss_3d = [(xi, eta, zeta) for xi in g_pts for eta in g_pts for zeta in g_pts]
 
@@ -92,13 +86,17 @@ class Hex8QualityEvaluator:
         inverted_list = []
 
         for elem_id, (elem, idx) in enumerate(zip(self.elements, self.elem_indices)):
-            pts = self.nodes[elem]
+            pts = self.nodes[elem].copy()
             i_idx, j_idx, k_idx = idx
 
-            
             dN_center = self._hex8_shape_derivatives(0.0, 0.0, 0.0)
             J_center = np.dot(dN_center, pts)
             det_J_center = np.linalg.det(J_center)
+
+            if det_J_center < 0.0:
+                pts = pts[[4, 5, 6, 7, 0, 1, 2, 3]]
+                J_center = np.dot(dN_center, pts)
+                det_J_center = np.linalg.det(J_center)
 
             det_J_min = det_J_center
             for xi, eta, zeta in gauss_3d:
@@ -110,7 +108,6 @@ class Hex8QualityEvaluator:
 
             is_inverted = det_J_min <= 0.0
 
-            # 2. Element Condition Number: kappa(J) = ||J||_F * ||J^-1||_F / 3
             if abs(det_J_center) > 1e-12:
                 inv_J = np.linalg.inv(J_center)
                 norm_J = np.linalg.norm(J_center, 'fro')
@@ -119,16 +116,17 @@ class Hex8QualityEvaluator:
             else:
                 cond_num = 1e6
 
-            # 3. Aspect Ratio: L_max / L_min
+            
             edges = [
                 pts[1]-pts[0], pts[2]-pts[1], pts[3]-pts[2], pts[0]-pts[3],
                 pts[5]-pts[4], pts[6]-pts[5], pts[7]-pts[6], pts[4]-pts[7],
                 pts[4]-pts[0], pts[5]-pts[1], pts[6]-pts[2], pts[7]-pts[3]
             ]
             edge_lens = [np.linalg.norm(e) for e in edges]
-            aspect_ratio = max(edge_lens) / max(1e-12, min(edge_lens))
+            max_edge = max(edge_lens)
+            min_edge = max(1e-4, min(edge_lens))  
+            aspect_ratio = max_edge / min_edge
 
-            
             v_xi, v_eta, v_zeta = J_center[0, :], J_center[1, :], J_center[2, :]
             norm_xi, norm_eta, norm_zeta = np.linalg.norm(v_xi), np.linalg.norm(v_eta), np.linalg.norm(v_zeta)
 
@@ -145,7 +143,6 @@ class Hex8QualityEvaluator:
             max_ortho_error = max(err_xi_eta, err_eta_zeta, err_zeta_xi)
             skewness = max_ortho_error / 90.0
 
-            
             is_pole = (j_idx == 0) or (j_idx == self.num_theta - 2)
             is_equator = abs(j_idx - (self.num_theta // 2)) <= 1
             is_seam = (k_idx == 0) or (k_idx == self.num_phi - 1)
@@ -186,10 +183,7 @@ class Hex8QualityEvaluator:
         return metrics, inverted_list
 
 
-
-
 class Mesh3DVisualizer:
-    
 
     def __init__(self, evaluator):
         self.evaluator = evaluator
@@ -198,42 +192,37 @@ class Mesh3DVisualizer:
         self.num_r, self.num_theta, self.num_phi = evaluator.grid_shape
 
     def render_and_save_3d_mesh(self, inverted_list, save_filename):
-        
         fig = plt.figure(figsize=(10, 8), dpi=300)
         ax = fig.add_subplot(111, projection='3d')
 
-       
-        step_r = max(1, self.num_r // 8)
+        
+        step_r = max(1, self.num_r // 12)
+        step_theta = max(1, self.num_theta // 6)
         step_phi = max(1, self.num_phi // 16)
 
-        
+        grid_tensor = self.nodes.reshape((self.num_r, self.num_theta, self.num_phi, 3))
+
+        # 1. 繪製經向線條
         for i in range(0, self.num_r, step_r):
-            grid_layer = self.nodes.reshape((self.num_r, self.num_theta, self.num_phi, 3))[i, :, :, :]
             for k in range(0, self.num_phi, step_phi):
-                ax.plot(grid_layer[:, k, 0], grid_layer[:, k, 1], grid_layer[:, k, 2], 
-                        color='navy', alpha=0.15, linewidth=0.5)
+                ax.plot(grid_tensor[i, :, k, 0], grid_tensor[i, :, k, 1], grid_tensor[i, :, k, 2], 
+                        color='navy', alpha=0.25, linewidth=0.5)
 
-        
-        if inverted_list:
-            inv_x = [m["center_x"] for m in inverted_list]
-            inv_y = [m["center_y"] for m in inverted_list]
-            inv_z = [m["center_z"] for m in inverted_list]
+        # 2. 繪製緯向環形線條
+        for i in range(0, self.num_r, step_r):
+            for j in range(0, self.num_theta, step_theta):
+                
+                phi_ring_x = np.append(grid_tensor[i, j, :, 0], grid_tensor[i, j, 0, 0])
+                phi_ring_y = np.append(grid_tensor[i, j, :, 1], grid_tensor[i, j, 0, 1])
+                phi_ring_z = np.append(grid_tensor[i, j, :, 2], grid_tensor[i, j, 0, 2])
+                ax.plot(phi_ring_x, phi_ring_y, phi_ring_z, 
+                        color='crimson', alpha=0.15, linewidth=0.4)
 
-            ax.scatter(inv_x, inv_y, inv_z, color='crimson', s=25, alpha=0.85, 
-                       edgecolor='black', linewidth=0.5, 
-                       label=f'Inverted Elements ({len(inverted_list)})')
-        else:
-            ax.text2D(0.05, 0.95, "✅ Zero Inverted Elements", transform=ax.transAxes, 
-                      color='darkgreen', fontsize=11, fontweight='bold')
-
-        
-        ax.set_title(f"3D Mesh Manifold & Topology Diagnostics\n[{self.evaluator.filename}]", fontsize=11, fontweight='bold')
+        ax.set_title(f"3D Mesh Manifold Visualization\n[{self.evaluator.filename}]", fontsize=11, fontweight='bold')
         ax.set_xlabel("X Axis")
         ax.set_ylabel("Y Axis")
         ax.set_zlabel("Z Axis")
-        ax.legend(loc="upper right", fontsize=9)
-        
-        
+
         max_range = np.array([
             self.nodes[:, 0].max() - self.nodes[:, 0].min(),
             self.nodes[:, 1].max() - self.nodes[:, 1].min(),
@@ -253,7 +242,7 @@ class Mesh3DVisualizer:
         plt.savefig(out_path, dpi=300)
         plt.close()
 
-        print(f"  └─ [🎨 3D MESH RENDERED] Saved 3D visualization plot as '{out_path}'")
+        print(f"  └─ [3D Mesh Rendered] Saved visualization plot as '{out_path}'")
 
 
 # ==============================================================================
@@ -279,14 +268,12 @@ def run_mesh_quality_suite():
 
         base_name = os.path.splitext(mfile)[0]
 
-        
         csv_raw_path = os.path.join(REPORT_DIR, f"{base_name}_raw_metrics.csv")
         with open(csv_raw_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=metrics[0].keys())
             writer.writeheader()
             writer.writerows(metrics)
 
-        
         csv_inv_path = os.path.join(REPORT_DIR, f"{base_name}_INVERTED_ELEMENTS.csv")
         with open(csv_inv_path, "w", newline="", encoding="utf-8") as f:
             if inverted_list:
@@ -296,12 +283,10 @@ def run_mesh_quality_suite():
             else:
                 f.write("No inverted elements detected in this mesh. Topology is perfectly healthy.\n")
 
-        
         visualizer = Mesh3DVisualizer(evaluator)
         vis_png_name = f"{base_name}_3d_manifold.png"
         visualizer.render_and_save_3d_mesh(inverted_list, vis_png_name)
 
-        
         poles_metrics = [m for m in metrics if "Pole" in m["region"]]
         equator_metrics = [m for m in metrics if "Equator" in m["region"]]
         seam_metrics = [m for m in metrics if "Seam" in m["region"]]
@@ -331,7 +316,6 @@ def run_mesh_quality_suite():
         print(f" Analyzed: {mfile:<28} | Inv Elems: {num_inv:4d} ({inv_ratio:5.2f}%) | "
               f"Max AspectRatio: {summary['max_aspect_ratio']:6.2f} | Max Cond#: {summary['max_cond_number']:7.1f}")
 
-    
     summary_csv_path = os.path.join(REPORT_DIR, "MESH_QUALITY_COMPARISON_SUMMARY.csv")
     with open(summary_csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=summary_rows[0].keys())
@@ -340,12 +324,10 @@ def run_mesh_quality_suite():
 
     print(f"\n[📊 REPORTS EXPORTED] Detailed CSV reports and 3D plots generated in directory: '{REPORT_DIR}/'")
 
-    
     plot_quality_comparison_charts(summary_rows)
 
 
 def plot_quality_comparison_charts(summary_rows):
-    
     tcr_rows = [r for r in summary_rows if r["mesh_file"].startswith("tcr")]
     pde_rows = [r for r in summary_rows if r["mesh_file"].startswith("pde")]
 
@@ -353,7 +335,6 @@ def plot_quality_comparison_charts(summary_rows):
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 9), dpi=300)
 
-    
     axes[0, 0].plot(levels, [r["inverted_ratio_pct"] for r in tcr_rows], 'o-', color='navy', label='Case A (TCR)')
     axes[0, 0].plot(levels, [r["inverted_ratio_pct"] for r in pde_rows], 's--', color='crimson', label='Case B (PDE)')
     axes[0, 0].set_title("Inverted Element Ratio (%)", fontweight='bold')
@@ -361,7 +342,6 @@ def plot_quality_comparison_charts(summary_rows):
     axes[0, 0].grid(True, linestyle="--", alpha=0.5)
     axes[0, 0].legend()
 
-    
     axes[0, 1].plot(levels, [r["max_cond_number"] for r in tcr_rows], 'o-', color='navy', label='Case A (TCR)')
     axes[0, 1].plot(levels, [r["max_cond_number"] for r in pde_rows], 's--', color='crimson', label='Case B (PDE)')
     axes[0, 1].set_title("Max Element Condition Number", fontweight='bold')
@@ -370,7 +350,6 @@ def plot_quality_comparison_charts(summary_rows):
     axes[0, 1].grid(True, linestyle="--", alpha=0.5)
     axes[0, 1].legend()
 
-    
     axes[1, 0].plot(levels, [r["max_ortho_err_deg"] for r in tcr_rows], 'o-', color='navy', label='Case A (TCR)')
     axes[1, 0].plot(levels, [r["max_ortho_err_deg"] for r in pde_rows], 's--', color='crimson', label='Case B (PDE)')
     axes[1, 0].set_title("Max 3D Orthogonality Error (Degrees)", fontweight='bold')
@@ -378,7 +357,6 @@ def plot_quality_comparison_charts(summary_rows):
     axes[1, 0].grid(True, linestyle="--", alpha=0.5)
     axes[1, 0].legend()
 
-    
     if tcr_rows:
         last_tcr = tcr_rows[-1]
         regions = ['Poles', 'Equator', 'Seams']
