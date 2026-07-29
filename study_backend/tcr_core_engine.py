@@ -33,7 +33,7 @@ def get_coupled_system_specification():
 
 
 # ==============================================================================
-#  SECTION 2: TCR ENGINE WITH CHAOTIC METRIC INTEGRATION
+#  SECTION 2: TCR ENGINE (PURE CHAOTIC FIELD DRIVEN)
 # ==============================================================================
 
 def execute_tcr_manifold_engine(system_input=None, config=None):
@@ -51,7 +51,7 @@ def execute_tcr_manifold_engine(system_input=None, config=None):
     tol = config.get("tol", 1e-5)
 
     # --------------------------------------------------------------------------
-    #  Step 1
+    #  Step 1:(Chaotic Field Gradient ||∇f||)
     # --------------------------------------------------------------------------
     vars_sym = [sp.Symbol(name, real=True) for name in ('x', 'y', 'z')]
     if isinstance(system_input, (list, tuple)):
@@ -59,39 +59,33 @@ def execute_tcr_manifold_engine(system_input=None, config=None):
     else:
         eq_syms = [sp.sympify(system_input, locals={'pi': np.pi})]
 
-    # J = dF_i / dx_j
-    J_sym = sp.Matrix([[sp.diff(f, v) for v in vars_sym] for f in eq_syms])
-    
-    #  det(I + J^T * J)
-    I_mat = sp.eye(len(vars_sym))
-    g_det_sym = (I_mat + J_sym.T * J_sym).det()
-    w_chaotic_sym = sp.sqrt(sp.Abs(g_det_sym))
-
+    #  f = sum(F_i^2) AND ||∇f||
     f_scalar_sym = sum(eq**2 for eq in eq_syms)
     grad_syms = [sp.diff(f_scalar_sym, v) for v in vars_sym]
     grad_norm_sq_sym = sum(g**2 for g in grad_syms)
 
-    w_chaotic_eval = sp.lambdify(vars_sym, w_chaotic_sym, modules=['numpy'])
+    f_scalar_eval = sp.lambdify(vars_sym, f_scalar_sym, modules=['numpy'])
     grad_norm_eval = sp.lambdify(vars_sym, sp.sqrt(grad_norm_sq_sym), modules=['numpy'])
 
     # --------------------------------------------------------------------------
-    #  Step 2: (0 < theta < pi/2)
+    #  Step 2: (0 < theta <= pi/4)
     # --------------------------------------------------------------------------
     eps = 1e-3
     r_arr = np.linspace(0.1, r_val, num_r)
-    theta_base_arr = np.linspace(eps, (np.pi / 2.0) - eps, num_theta)
+    
+    theta_base_arr = np.linspace(eps, (np.pi / 4.0), num_theta)
     phi_arr = np.linspace(0, 2 * np.pi, num_phi, endpoint=False)
 
     dr = r_arr[1] - r_arr[0]
     grid_shape = (num_r, num_theta, num_phi)
 
     # --------------------------------------------------------------------------
-    #  Step 3:  n(r, theta)
+    #  Step 3: n(r, theta)
     # --------------------------------------------------------------------------
-    print(f"[TCR Engine] Evaluating chaotic manifold surface integral ({num_r}x{num_theta}x{num_phi})...")
-    
+    print(f"[TCR Engine] Computing chaotic density field n(r, theta)...")
+
     n_field = np.zeros(grid_shape, dtype=np.float64)
-    g_val_matrix = np.zeros(grid_shape, dtype=np.float64)
+    grad_norm_matrix = np.zeros(grid_shape, dtype=np.float64)
 
     for j in range(num_theta):
         th_b = theta_base_arr[j]
@@ -101,34 +95,40 @@ def execute_tcr_manifold_engine(system_input=None, config=None):
 
             for i in range(num_r):
                 r_c = r_arr[i]
-                x_ref = r_c * np.sin(th_b) * np.cos(ph_c)
-                y_ref = r_c * np.sin(th_b) * np.sin(ph_c)
-                z_ref = r_c * np.cos(th_b)
+                
+                
+                x_c = r_c * np.sin(th_b) * np.cos(ph_c)
+                y_c = r_c * np.sin(th_b) * np.sin(ph_c)
+                z_c = r_c * np.cos(th_b)
+
+                g_v = float(grad_norm_eval(x_c, y_c, z_c))
+                f_v = float(f_scalar_eval(x_c, y_c, z_c))
+                grad_norm_matrix[i, j, k] = g_v
 
                 
-                w_val = float(w_chaotic_eval(x_ref, y_ref, z_ref))
-                g_v = float(grad_norm_eval(x_ref, y_ref, z_ref))
-                g_val_matrix[i, j, k] = g_v
-
+                chaotic_factor = np.sqrt(1.0 + np.abs(f_v))
                 if i > 0:
-                    n_integral += w_val * dr
+                    n_integral += chaotic_factor * dr
 
                 n_field[i, j, k] = n_integral
 
     # --------------------------------------------------------------------------
     #  Step 4
     # --------------------------------------------------------------------------
-    print(f"[TCR Engine] Solving theta mapping iteration (Tol={tol:.1e})...")
+    print(f"[TCR Engine] Evaluating theta mapping driven by arctan(||grad f||)...")
 
-    alpha_scale = 0.15
+    alpha_scale = 0.01  
     theta_mapped = np.tile(theta_base_arr[None, :, None], (num_r, 1, num_phi))
 
     residual_history = []
     converged = False
 
     for iteration in range(1, max_iter + 1):
-        d_theta = alpha_scale * np.arctan(n_field / (1.0 + g_val_matrix))
-        theta_new = np.clip(theta_base_arr[None, :, None] + d_theta, eps, (np.pi / 2.0) - eps)
+        
+        d_theta = alpha_scale * np.arctan(grad_norm_matrix / 100.0)
+        
+       
+        theta_new = np.clip(theta_base_arr[None, :, None] + d_theta, eps, (np.pi / 4.0))
 
         res = float(np.max(np.abs(theta_new - theta_mapped)))
         residual_history.append(res)
@@ -137,7 +137,7 @@ def execute_tcr_manifold_engine(system_input=None, config=None):
 
         if res < tol:
             converged = True
-            print(f"[TCR Engine] Manifold iteration converged at step {iteration}, final residual: {res:.4e}")
+            print(f"[TCR Engine] Iteration converged at step {iteration}, final residual: {res:.4e}")
             break
 
     if not converged:
@@ -162,7 +162,7 @@ def execute_tcr_manifold_engine(system_input=None, config=None):
                 tan_th = np.tan(th_m)
                 cot_th = 1.0 / max(1e-12, tan_th)
 
-                # TCR 
+                #  TCR 
                 X[i, j, k] = np.cos(ph_c) * np.sqrt(np.abs(n_v * cot_th))
                 Y[i, j, k] = np.sin(ph_c) * np.sqrt(np.abs(n_v * cot_th))
                 
@@ -172,7 +172,7 @@ def execute_tcr_manifold_engine(system_input=None, config=None):
                 Z[i, j, k] = sign_z * np.sqrt(np.abs(n_v * tan_th))
 
     # --------------------------------------------------------------------------
-    #  Step 6
+    #  Step 6:
     # --------------------------------------------------------------------------
     vertices = []
     node_map = {}
@@ -208,13 +208,13 @@ def execute_tcr_manifold_engine(system_input=None, config=None):
 
     mesh_data = {
         "metadata": {
-            "solver": "Chaotic Manifold 3D TCR Engine",
+            "solver": "Chaotic Derivative 3D TCR Engine",
             "converged": converged,
             "final_iteration": len(residual_history),
             "final_residual": residual_history[-1],
             "residual_history": residual_history,
             "grid_shape": [num_r, num_theta, num_phi],
-            "angle_bounds": "0 < theta < pi/2"
+            "angle_bounds": "0 < theta <= pi/4"
         },
         "grid_shape": [num_r, num_theta, num_phi],
         "vertices": vertices
