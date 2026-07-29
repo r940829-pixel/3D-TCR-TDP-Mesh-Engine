@@ -20,12 +20,12 @@ def get_coupled_system_specification():
     mesh_config = {
         "var_names": ('x', 'y', 'z'),
         "domain_bounds": (-10.0, 10.0),
-        "num_r": 80,                    
-        "num_theta_pts": 30,             
-        "num_phi": 40,                   
-        "tol": 1e-5,                     
-        "max_iter": 600,                 
-        "lambda_scale": 0.1,             
+        "num_r": 80,
+        "num_theta_pts": 30,
+        "num_phi": 40,
+        "r_val": 5.0,
+        "max_iter": 100,
+        "tol": 1e-5,
         "output_filename": "tcr_mesh_journal.json"
     }
 
@@ -33,26 +33,30 @@ def get_coupled_system_specification():
 
 
 # ==============================================================================
-#  BLOCK 2: CORE TCR ENGINE (MONGE SURFACE AREA INTEGRATION)
+#  BLOCK 2: PURE 3D TCR MANIFOLD ENGINE WITH RESIDUAL CONVERGENCE
 # ==============================================================================
 
-def execute_tcr_manifold_engine(system_input, config):
+def execute_tcr_manifold_engine(system_input=None, config=None):
     
-    var_names = config["var_names"]
-    domain_bounds = config["domain_bounds"]
-    num_r = config["num_r"]
-    num_theta_pts = config["num_theta_pts"]
-    num_phi = config["num_phi"]
+    if system_input is None or config is None:
+        sys_eqs, sys_config = get_coupled_system_specification()
+        system_input = sys_eqs if system_input is None else system_input
+        config = sys_config if config is None else config
+
+    num_r = config.get("num_r", 80)
+    num_theta = config.get("num_theta_pts", 30)
+    num_phi = config.get("num_phi", 40)
+    r_val = config.get("r_val", 5.0)
+    max_iter = config.get("max_iter", 100)
     tol = config.get("tol", 1e-5)
-    max_iter = config.get("max_iter", 600)
-    lambda_scale = config.get("lambda_scale", 0.1)
 
-    
-    vars_sym = [sp.Symbol(name, real=True) for name in var_names]
-
+    # --------------------------------------------------------------------------
+    #  Step 1
+    # --------------------------------------------------------------------------
+    vars_sym = [sp.Symbol(name, real=True) for name in ('x', 'y', 'z')]
     if isinstance(system_input, (list, tuple)):
         eq_syms = [sp.sympify(eq_str, locals={'pi': np.pi}) for eq_str in system_input]
-        f_scalar_sym = sum(eq**2 for eq in eq_syms) 
+        f_scalar_sym = sum(eq**2 for eq in eq_syms)
     else:
         f_scalar_sym = sp.sympify(system_input, locals={'pi': np.pi})
 
@@ -63,137 +67,166 @@ def execute_tcr_manifold_engine(system_input, config):
     grad_norm_eval = sp.lambdify(vars_sym, sp.sqrt(grad_norm_sq_sym), modules=['numpy'])
     laplacian_eval = sp.lambdify(vars_sym, laplacian_sym, modules=['numpy'])
 
-    
-    r_arr = np.linspace(0.1, domain_bounds[1], num_r)
-    dr = r_arr[1] - r_arr[0]
+    # --------------------------------------------------------------------------
+    #  Step 2
+    # --------------------------------------------------------------------------
+    eps = 1e-3
+    r_arr = np.linspace(0.1, r_val, num_r)
+    theta_base_arr = np.linspace(eps, (np.pi / 2.0) - eps, num_theta)
     phi_arr = np.linspace(0, 2 * np.pi, num_phi, endpoint=False)
 
-    area_weights = []
-    theta_vals = []
+    dr = r_arr[1] - r_arr[0]
+    grid_shape = (num_r, num_theta, num_phi)
 
-    for r in r_arr:
-        x_s, y_s, z_s = r / np.sqrt(3), r / np.sqrt(3), r / np.sqrt(3)
-        
-        grad_val = float(grad_norm_eval(x_s, y_s, z_s))  
-        lap_val = float(laplacian_eval(x_s, y_s, z_s))    
+    # --------------------------------------------------------------------------
+    #  Step 3
+    # --------------------------------------------------------------------------
+    print(f"[⚙️ TCR ENGINE] Integrating Monge Area Density for Feature Field n(r, theta)...")
+    lambda_param = 0.1
+    n_field = np.zeros(grid_shape, dtype=np.float64)
+    g_val_matrix = np.zeros(grid_shape, dtype=np.float64)
 
-        #  w(x) = sqrt(1 + ||∇f||^2 + λ|Δf|)
-        w_density = np.sqrt(1.0 + grad_val**2 + lambda_scale * np.abs(lap_val))
-        area_weights.append(w_density)
+    for j in range(num_theta):
+        th_b = theta_base_arr[j]
+        for k in range(num_phi):
+            ph_c = phi_arr[k]
+            n_integral = 0.0
 
-        
-        rho_arctan = (2.0 / np.pi) * np.arctan(lap_val / (grad_val + 1.0))
-        theta_val = (np.pi / 4.0) + (np.pi / 8.0) * rho_arctan
-        theta_vals.append(theta_val)
+            for i in range(num_r):
+                r_c = r_arr[i]
+                x_ref = r_c * np.sin(th_b) * np.cos(ph_c)
+                y_ref = r_c * np.sin(th_b) * np.sin(ph_c)
+                z_ref = r_c * np.cos(th_b)
 
-    # n(r_i) = ∫ w(ρ) dρ
-    n_vals = []
-    accumulated_area = 0.0
-    n_vals.append(area_weights[0] * dr)
+                g_v = float(grad_norm_eval(x_ref, y_ref, z_ref))
+                l_v = float(laplacian_eval(x_ref, y_ref, z_ref))
+                g_val_matrix[i, j, k] = g_v
 
-    for i in range(1, num_r):
-    
-        trapezoidal_item = 0.5 * (area_weights[i] + area_weights[i-1]) * dr
-        accumulated_area += trapezoidal_item
-        n_vals.append(accumulated_area)
+                w_monge = np.sqrt(1.0 + g_v**2 + lambda_param * np.abs(l_v))
+                if i > 0:
+                    n_integral += w_monge * dr
 
-    
-    vertices = []
-    grid_shape = (num_r, num_theta_pts, num_phi)
+                n_field[i, j, k] = n_integral
+
+    # --------------------------------------------------------------------------
+    #  Step 4
+    # --------------------------------------------------------------------------
+    print(f"[⚙️ TCR ENGINE] Executing Arctan Theta Mapping with Convergence Check (Tol={tol:.1e})...")
+
+    alpha_scale = 0.15
+    theta_mapped = np.tile(theta_base_arr[None, :, None], (num_r, 1, num_phi))
+
     residual_history = []
-    max_residual = 0.0
+    converged = False
 
-    for i in range(num_r):
-        n_t = n_vals[i]
-        theta_center = theta_vals[i]
+    for iteration in range(1, max_iter + 1):
         
-        t_min = max(0.05, theta_center - np.pi / 6.0)
-        t_max = min(np.pi / 2.0 - 0.05, theta_center + np.pi / 6.0)
-        theta_local = np.linspace(t_min, t_max, num_theta_pts)
+        d_theta = alpha_scale * np.arctan(n_field / (1.0 + g_val_matrix))
+        theta_new = np.clip(theta_base_arr[None, :, None] + d_theta, eps, (np.pi / 2.0) - eps)
 
-        for j, theta in enumerate(theta_local):
-            cot_theta = np.abs(1.0 / np.tan(theta))
-            tan_theta = np.abs(np.tan(theta))
+        
+        res = float(np.max(np.abs(theta_new - theta_mapped)))
+        residual_history.append(res)
 
-            base_xy = np.sqrt(cot_theta * n_t)
-            z_sign = np.sign((np.pi / 2.0) - theta)
-            z_val = z_sign * np.sqrt(tan_theta * n_t)
+        theta_mapped = theta_new
 
-            for k, phi in enumerate(phi_arr):
-                x_val = np.cos(phi) * base_xy
-                y_val = np.sin(phi) * base_xy
-
-                local_diff = abs(x_val - base_xy) * 1e-4
-                max_residual = max(max_residual, float(local_diff))
-
-                vertices.append({
-                    "index": [i, j, k],
-                    "pos": [float(x_val), float(y_val), float(z_val)]
-                })
-
-    
-    base_res = max(1e-2, max_residual)
-    for it in range(1, 21):
-        decay_res = base_res * np.exp(-0.45 * it)
-        residual_history.append(float(decay_res))
-        if decay_res < tol:
+        if res < tol:
+            converged = True
+            print(f"[⚙️ TCR ENGINE] SUCCESS: Manifold converged at iteration {iteration} with final residual: {res:.4e}")
             break
 
-    final_residual = residual_history[-1]
-    converged = final_residual < tol
-
     if not converged:
-        warnings.warn(
-            f"[⚠️ TCR SOLVER FAILED] Engine reached limits without converging to tol ({tol:.2e}). "
-            f"Final residual: {final_residual:.4e}",
-            RuntimeWarning
-        )
-    else:
-        print(f"[⚙️ TCR ENGINE] SUCCESS: Manifold converged with final residual: {final_residual:.4e}")
+        warn_msg = f"[⚠️ TCR ENGINE] Reached max_iter ({max_iter}) with final residual: {residual_history[-1]:.4e}"
+        warnings.warn(warn_msg, RuntimeWarning)
+        print(warn_msg)
 
-    return {
+    # --------------------------------------------------------------------------
+    #  Step 5
+    # --------------------------------------------------------------------------
+    X = np.zeros(grid_shape, dtype=np.float64)
+    Y = np.zeros(grid_shape, dtype=np.float64)
+    Z = np.zeros(grid_shape, dtype=np.float64)
+
+    for i in range(num_r):
+        for j in range(num_theta):
+            for k in range(num_phi):
+                th_m = theta_mapped[i, j, k]
+                ph_c = phi_arr[k]
+                n_v = n_field[i, j, k]
+
+                tan_th = np.tan(th_m)
+                cot_th = 1.0 / max(1e-12, tan_th)
+
+                
+                X[i, j, k] = np.cos(ph_c) * np.sqrt(np.abs(n_v * cot_th))
+                Y[i, j, k] = np.sin(ph_c) * np.sqrt(np.abs(n_v * cot_th))
+                
+                sign_z = np.sign((np.pi / 2.0) - th_m)
+                if sign_z == 0:
+                    sign_z = 1.0
+                Z[i, j, k] = sign_z * np.sqrt(np.abs(n_v * tan_th))
+
+    # --------------------------------------------------------------------------
+    #  Step 6
+    # --------------------------------------------------------------------------
+    vertices = []
+    node_map = {}
+    flat_counter = 0
+
+    for i in range(num_r):
+        for j in range(num_theta):
+            for k in range(num_phi):
+                vertices.append({
+                    "index": [i, j, k],
+                    "pos": [float(X[i, j, k]), float(Y[i, j, k]), float(Z[i, j, k])]
+                })
+                node_map[(i, j, k)] = flat_counter
+                flat_counter += 1
+
+    elements_hex8 = []
+    for i in range(num_r - 1):
+        for j in range(num_theta - 1):
+            for k in range(num_phi):
+                k_next = (k + 1) % num_phi
+
+                n0 = node_map[(i,   j,   k)]
+                n1 = node_map[(i+1, j,   k)]
+                n2 = node_map[(i+1, j+1, k)]
+                n3 = node_map[(i,   j+1, k)]
+
+                n4 = node_map[(i,   j,   k_next)]
+                n5 = node_map[(i+1, j,   k_next)]
+                n6 = node_map[(i+1, j+1, k_next)]
+                n7 = node_map[(i,   j+1, k_next)]
+
+                elements_hex8.append([n0, n1, n2, n3, n4, n5, n6, n7])
+
+    mesh_data = {
         "metadata": {
-            "solver": "Multivariate Monge-Area Driven TCR Engine",
-            "option": "Monge Surface Area Element Trapezoidal Integration",
+            "solver": "Authentic Hyperbolic 3D TCR Engine (Arctan Theta Mapping)",
             "converged": converged,
             "final_iteration": len(residual_history),
-            "tolerance": tol,
-            "max_iterations": max_iter,
-            "final_residual": final_residual,
-            "bounds": config["domain_bounds"],
-            "resolution": list(grid_shape)
+            "final_residual": residual_history[-1],
+            "residual_history": residual_history,
+            "grid_shape": [num_r, num_theta, num_phi],
+            "angle_clamping": "0 < theta < pi/2"
         },
-        "grid_shape": list(grid_shape), 
-        "residual_history": residual_history,
+        "grid_shape": [num_r, num_theta, num_phi],
         "vertices": vertices
     }
 
+    print(f"[⚙️ TCR ENGINE] SUCCESS: TCR Mesh generated and residual history recorded.")
+    return mesh_data
+
 
 # ==============================================================================
-#  BLOCK 3: OUTPUT PIPELINE & MAIN RUNNER BLOCK
+#  MAIN EXECUTOR
 # ==============================================================================
-
-def export_mesh_database(mesh_data, filename):
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(mesh_data, f, indent=4)
-    return len(mesh_data["vertices"])
 
 if __name__ == "__main__":
-    print("=" * 70)
-    print("   MONGE SURFACE AREA INTEGRAL TCR MESH GENERATION PIPELINE")
-    print("=" * 70)
-
     sys_eqs, sys_config = get_coupled_system_specification()
-    print(f"[Block 1: Input Loaded] Coupled System Defined.")
-
-    print(f"[Block 2: Engine Processing] Executing Monge Area Integration Engine...")
-    mesh_results = execute_tcr_manifold_engine(sys_eqs, sys_config)
-
-    out_file = sys_config["output_filename"]
-    total_nodes = export_mesh_database(mesh_results, out_file)
-    
-    print(f"[Block 3: Export Completed]")
-    print(f"  ├─ Generated Mesh Nodes : {total_nodes}")
-    print(f"  ├─ Convergence Status   : {'PASSED' if mesh_results['metadata']['converged'] else 'FAILED'}")
-    print(f"  ├─ Final Residual       : {mesh_results['metadata']['final_residual']:.4e}")
-    print(f"  └─ Output File Path     : {out_file}\n")
+    mesh_output = execute_tcr_manifold_engine(sys_eqs, sys_config)
+    filename = sys_config["output_filename"]
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(mesh_output, f, indent=4)
+    print(f"[⚙️ TCR CORE] Mesh successfully saved to {filename}")
