@@ -62,7 +62,7 @@ def get_system_environment_info():
 
 
 def save_environment_report(env_info, filepath):
-    
+  
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(env_info, f, indent=4)
     
@@ -78,8 +78,8 @@ def save_environment_report(env_info, filepath):
 #  2. MESH GENERATION EXECUTORS CALLING TRUE PIPELINE ENGINES
 # ==============================================================================
 
-def measure_tcr_pipeline_execution_cost(num_r, num_theta, num_phi, output_path):
-  
+def measure_tcr_pipeline_execution_cost(num_theta, num_phi, output_path):
+    
     if tcr_core_engine is None or not hasattr(tcr_core_engine, 'execute_tcr_manifold_engine'):
         raise RuntimeError(
             "[❌ CRITICAL ERROR] Pipeline module 'tcr_core_engine.py' with 'execute_tcr_manifold_engine' "
@@ -88,14 +88,11 @@ def measure_tcr_pipeline_execution_cost(num_r, num_theta, num_phi, output_path):
 
     t_start = time.perf_counter()
 
-    sys_eqs, _ = tcr_core_engine.get_coupled_system_specification()
+    sys_eqs, sys_config = tcr_core_engine.get_coupled_system_specification()
     config = {
-        "num_r": num_r,
         "num_theta_pts": num_theta,
         "num_phi": num_phi,
-        "r_val": 5.0,
-        "max_iter": 100,
-        "tol": 1e-5,
+        "n_val": 1.0,
         "output_filename": output_path
     }
     
@@ -108,7 +105,7 @@ def measure_tcr_pipeline_execution_cost(num_r, num_theta, num_phi, output_path):
 
 
 def measure_pde_pipeline_execution_cost(num_r, num_theta, num_phi, output_path):
- 
+    
     if pde_core_engine is None or not hasattr(pde_core_engine, 'generate_pure_pde_3d_mesh'):
         raise RuntimeError(
             "[❌ CRITICAL ERROR] Pipeline module 'pde_core_engine.py' with 'generate_pure_pde_3d_mesh' "
@@ -117,7 +114,6 @@ def measure_pde_pipeline_execution_cost(num_r, num_theta, num_phi, output_path):
 
     t_start = time.perf_counter()
 
-    
     pde_core_engine.generate_pure_pde_3d_mesh(
         r_val=5.0,
         num_r=num_r,
@@ -164,33 +160,36 @@ def run_scalability_benchmark():
     save_environment_report(env_info, env_json_path)
 
     mesh_levels = [
-        {"level": "L1", "shape": (16, 8, 12)},
-        {"level": "L2", "shape": (24, 10, 16)},
-        {"level": "L3", "shape": (32, 14, 20)},
-        {"level": "L4", "shape": (48, 18, 24)},
-        {"level": "L5", "shape": (60, 22, 28)},
-        {"level": "L6", "shape": (72, 26, 32)},
-        {"level": "L7", "shape": (80, 30, 40)}
+        {"level": "L1", "shape": (16, 10, 20)},
+        {"level": "L2", "shape": (24, 15, 30)},
+        {"level": "L3", "shape": (32, 20, 40)},
+        {"level": "L4", "shape": (48, 30, 60)},
+        {"level": "L5", "shape": (60, 40, 80)},
+        {"level": "L6", "shape": (72, 50, 100)},
+        {"level": "L7", "shape": (80, 60, 120)}
     ]
 
     benchmark_records = []
     tcr_times = []
     pde_times = []
-    node_counts = []
+    tcr_node_counts = []
+    pde_node_counts = []
 
-    print(f"{'Level':<6} | {'Grid Shape (r,th,ph)':<20} | {'Total Nodes (N)':<15} | {'TCR Time (s)':<14} | {'PDE Time (s)':<14}")
-    print("-" * 80)
+    print(f"{'Level':<6} | {'Grid Shape (th,ph / r,th,ph)':<30} | {'TCR N':<10} | {'PDE N':<10} | {'TCR Time (s)':<12} | {'PDE Time (s)':<12}")
+    print("-" * 95)
 
     for lvl_info in mesh_levels:
         lvl = lvl_info["level"]
         nr, nth, nph = lvl_info["shape"]
-        total_nodes = nr * nth * nph
+        
+        tcr_nodes = nth * nph
+        pde_nodes = nr * nth * nph
 
         tcr_json = os.path.join(BENCHMARK_DIR, f"temp_tcr_{lvl}.json")
         pde_json = os.path.join(BENCHMARK_DIR, f"temp_pde_{lvl}.json")
 
         num_repeats = 3
-        tcr_t_list = [measure_tcr_pipeline_execution_cost(nr, nth, nph, tcr_json) for _ in range(num_repeats)]
+        tcr_t_list = [measure_tcr_pipeline_execution_cost(nth, nph, tcr_json) for _ in range(num_repeats)]
         pde_t_list = [measure_pde_pipeline_execution_cost(nr, nth, nph, pde_json) for _ in range(num_repeats)]
 
         tcr_t_avg = np.mean(tcr_t_list)
@@ -198,19 +197,22 @@ def run_scalability_benchmark():
 
         tcr_times.append(tcr_t_avg)
         pde_times.append(pde_t_avg)
-        node_counts.append(total_nodes)
+        tcr_node_counts.append(tcr_nodes)
+        pde_node_counts.append(pde_nodes)
 
         if os.path.exists(tcr_json): os.remove(tcr_json)
         if os.path.exists(pde_json): os.remove(pde_json)
 
-        print(f"{lvl:<6} | {f'{nr}x{nth}x{nph}':<20} | {total_nodes:<15,d} | {tcr_t_avg:<14.4f} | {pde_t_avg:<14.4f}")
+        shape_str = f"({nth}x{nph} / {nr}x{nth}x{nph})"
+        print(f"{lvl:<6} | {shape_str:<30} | {tcr_nodes:<10,d} | {pde_nodes:<10,d} | {tcr_t_avg:<12.4f} | {pde_t_avg:<12.4f}")
 
         benchmark_records.append({
             "level": lvl,
-            "num_r": nr,
+            "num_r_pde": nr,
             "num_theta": nth,
             "num_phi": nph,
-            "total_nodes_N": total_nodes,
+            "tcr_nodes_N": tcr_nodes,
+            "pde_nodes_N": pde_nodes,
             "tcr_runtime_sec": round(tcr_t_avg, 6),
             "pde_runtime_sec": round(pde_t_avg, 6),
             "time_ratio_tcr_vs_pde": round(tcr_t_avg / max(1e-6, pde_t_avg), 4)
@@ -223,12 +225,13 @@ def run_scalability_benchmark():
         writer.writerows(benchmark_records)
     print(f"\n[📊 CSV EXPORTED] Saved raw timing benchmark data to '{raw_csv_path}'")
 
-    node_counts_arr = np.array(node_counts, dtype=np.float64)
+    tcr_nodes_arr = np.array(tcr_node_counts, dtype=np.float64)
+    pde_nodes_arr = np.array(pde_node_counts, dtype=np.float64)
     tcr_times_arr = np.array(tcr_times, dtype=np.float64)
     pde_times_arr = np.array(pde_times, dtype=np.float64)
 
-    slope_tcr, intercept_tcr = calculate_empirical_complexity_slope(node_counts_arr, tcr_times_arr)
-    slope_pde, intercept_pde = calculate_empirical_complexity_slope(node_counts_arr, pde_times_arr)
+    slope_tcr, _ = calculate_empirical_complexity_slope(tcr_nodes_arr, tcr_times_arr)
+    slope_pde, _ = calculate_empirical_complexity_slope(pde_nodes_arr, pde_times_arr)
 
     print("\n" + "=" * 80)
     print("   DYNAMIC EMPIRICAL COMPLEXITY ANALYSIS (SLOPE FIT)")
@@ -237,7 +240,7 @@ def run_scalability_benchmark():
     print(f"  • PDE Empirical Complexity Slope p = {slope_pde:.4f}  => Dynamic O(N^{slope_pde:.2f})")
     print("=" * 80 + "\n")
 
-    plot_loglog_scalability_chart(node_counts_arr, tcr_times_arr, pde_times_arr, 
+    plot_loglog_scalability_chart(tcr_nodes_arr, pde_nodes_arr, tcr_times_arr, pde_times_arr, 
                                  slope_tcr, slope_pde, env_info)
 
 
@@ -245,23 +248,23 @@ def run_scalability_benchmark():
 #  5. LOG-LOG RUNTIME PLOTTING & COMPLEXITY ANNOTATION
 # ==============================================================================
 
-def plot_loglog_scalability_chart(nodes, tcr_t, pde_t, slope_tcr, slope_pde, env_info):
+def plot_loglog_scalability_chart(tcr_nodes, pde_nodes, tcr_t, pde_t, slope_tcr, slope_pde, env_info):
     fig, ax = plt.subplots(figsize=(9, 6.5), dpi=300)
 
-    ax.loglog(nodes, tcr_t, 'o-', color='navy', linewidth=2.0, markersize=7, 
-              label=f'Case A (TCR) - Dynamic $\mathcal{{O}}(N^{{{slope_tcr:.2f}}})$')
-    ax.loglog(nodes, pde_t, 's--', color='crimson', linewidth=1.8, markersize=6, 
-              label=f'Case B (PDE) - Dynamic $\mathcal{{O}}(N^{{{slope_pde:.2f}}})$')
+    ax.loglog(tcr_nodes, tcr_t, 'o-', color='navy', linewidth=2.0, markersize=7, 
+              label=f'Case A (Pure TCR) - Dynamic $\mathcal{{O}}(N^{{{slope_tcr:.2f}}})$')
+    ax.loglog(pde_nodes, pde_t, 's--', color='crimson', linewidth=1.8, markersize=6, 
+              label=f'Case B (PDE Baseline) - Dynamic $\mathcal{{O}}(N^{{{slope_pde:.2f}}})$')
 
-    ref_line = (nodes / nodes[0]) * tcr_t[0]
-    ax.loglog(nodes, ref_line, 'k:', alpha=0.5, linewidth=1.2, label=r'Theoretical Reference $\mathcal{O}(N^1)$')
+    ref_line = (tcr_nodes / tcr_nodes[0]) * tcr_t[0]
+    ax.loglog(tcr_nodes, ref_line, 'k:', alpha=0.5, linewidth=1.2, label=r'Theoretical Reference $\mathcal{O}(N^1)$')
 
-    ax.text(nodes[-2] * 0.80, tcr_t[-2] * 1.35, f'Slope $p = {slope_tcr:.2f}$', 
+    ax.text(tcr_nodes[-2] * 0.80, tcr_t[-2] * 1.35, f'Slope $p = {slope_tcr:.2f}$', 
             color='navy', fontweight='bold', fontsize=10)
-    ax.text(nodes[-2] * 0.80, pde_t[-2] * 0.65, f'Slope $p = {slope_pde:.2f}$', 
+    ax.text(pde_nodes[-2] * 0.80, pde_t[-2] * 0.65, f'Slope $p = {slope_pde:.2f}$', 
             color='crimson', fontweight='bold', fontsize=10)
 
-    ax.set_title("3D Mesh Scaling & Execution Time Benchmark\n[Log-Log Dynamic Complexity Analysis]", 
+    ax.set_title("Mesh Scaling & Execution Time Benchmark\n[Log-Log Dynamic Complexity Analysis]", 
                  fontsize=12, fontweight='bold')
     ax.set_xlabel("Total Mesh Nodes / Degrees of Freedom ($N$)", fontsize=11, fontweight='bold')
     ax.set_ylabel("Total End-to-End Execution Time [s] (Log Scale)", fontsize=11, fontweight='bold')
