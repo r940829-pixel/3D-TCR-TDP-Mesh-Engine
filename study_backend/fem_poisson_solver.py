@@ -8,21 +8,17 @@ import scipy.sparse.linalg as spla
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
 
-
 rcParams['font.family'] = 'serif'
 rcParams['mathtext.fontset'] = 'cm'
 rcParams['axes.linewidth'] = 1.0
 rcParams['xtick.direction'] = 'in'
 rcParams['ytick.direction'] = 'in'
 
-
 from tcr_core_engine import execute_tcr_manifold_engine, get_coupled_system_specification
 from pde_core_engine import generate_pure_pde_3d_mesh
 
 R_BOUND = 10.0  
 MESH_OUTPUT_DIR = "generated_meshes"  
-
-
 os.makedirs(MESH_OUTPUT_DIR, exist_ok=True)
 
 # ==============================================================================
@@ -30,12 +26,12 @@ os.makedirs(MESH_OUTPUT_DIR, exist_ok=True)
 # ==============================================================================
 
 def exact_u_3d(x, y, z):
-    """ u(x, y, z) = sin(pi*x/R) * sin(pi*y/R) * cos(pi*z/R) + 1.0"""
+    """ u(x, y, z) = sin(pi*x/R) * sin(pi*y/R) * cos(pi*z/R) + 1.0 """
     k = np.pi / R_BOUND
     return np.sin(k * x) * np.sin(k * y) * np.cos(k * z) + 1.0
 
 def exact_grad_u_3d(x, y, z):
-    """ [du/dx, du/dy, du/dz]"""
+    """ [du/dx, du/dy, du/dz] """
     k = np.pi / R_BOUND
     du_dx =  k * np.cos(k * x) * np.sin(k * y) * np.cos(k * z)
     du_dy =  k * np.sin(k * x) * np.cos(k * y) * np.cos(k * z)
@@ -43,59 +39,113 @@ def exact_grad_u_3d(x, y, z):
     return np.array([du_dx, du_dy, du_dz])
 
 def source_term_f_3d(x, y, z):
-    """ f(x, y, z) = - (d2u/dx2 + d2u/dy2 + d2u/dz2)"""
+    """ f(x, y, z) = - (d2u/dx2 + d2u/dy2 + d2u/dz2) """
     k = np.pi / R_BOUND
     return 3.0 * (k ** 2) * np.sin(k * x) * np.sin(k * y) * np.cos(k * z)
 
 # ==============================================================================
-#  SECTION 2: 3D HEXAHEDRAL (HEX8) MESH RECONSTRUCTION & FEM SOLVER
+#  SECTION 2: HYBRID 2D/3D MESH ADAPTER & HEX8 FEM SOLVER
 # ==============================================================================
 
 def load_and_build_3d_hex_mesh(json_filepath):
-
+    
     with open(json_filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     grid_shape = data["grid_shape"]
     vertices = data["vertices"]
-    num_r, num_theta, num_phi = grid_shape
 
-    nodes_3d = np.zeros((len(vertices), 3), dtype=np.float64)
-    boundary_mask = np.zeros(len(vertices), dtype=bool)
-    node_map = {}
+    
+    if len(grid_shape) == 3:
+        num_r, num_theta, num_phi = grid_shape
+        nodes_3d = np.zeros((len(vertices), 3), dtype=np.float64)
+        boundary_mask = np.zeros(len(vertices), dtype=bool)
+        node_map = {}
 
-    for node in vertices:
-        i, j, k = node["index"]
-        flat_idx = i * (num_theta * num_phi) + j * num_phi + k
-        nodes_3d[flat_idx] = node["pos"]
-        node_map[(i, j, k)] = flat_idx
+        for node in vertices:
+            i, j, k = node["index"]
+            flat_idx = i * (num_theta * num_phi) + j * num_phi + k
+            nodes_3d[flat_idx] = node["pos"]
+            node_map[(i, j, k)] = flat_idx
+
+            if i == 0 or i == num_r - 1:
+                boundary_mask[flat_idx] = True
+
+        elements_hex8 = []
+        for i in range(num_r - 1):
+            for j in range(num_theta - 1):
+                for k in range(num_phi):
+                    k_next = (k + 1) % num_phi  
+
+                    n0 = node_map[(i,   j,   k)]
+                    n1 = node_map[(i+1, j,   k)]
+                    n2 = node_map[(i+1, j+1, k)]
+                    n3 = node_map[(i,   j+1, k)]
+                    n4 = node_map[(i,   j,   k_next)]
+                    n5 = node_map[(i+1, j,   k_next)]
+                    n6 = node_map[(i+1, j+1, k_next)]
+                    n7 = node_map[(i,   j+1, k_next)]
+
+                    elements_hex8.append([n0, n1, n2, n3, n4, n5, n6, n7])
+
+        return nodes_3d, np.array(elements_hex8), boundary_mask
+
+    else:
+        
+        num_theta, num_phi = grid_shape
+        num_pts_2d = num_theta * num_phi
+        
+        nodes_2d = np.zeros((num_pts_2d, 3), dtype=np.float64)
+        node_map_2d = {}
+
+        for node in vertices:
+            i, j = node["index"]
+            flat_idx = i * num_phi + j
+            nodes_2d[flat_idx] = node["pos"]
+            node_map_2d[(i, j)] = flat_idx
 
         
-        if i == 0 or i == num_r - 1:
-            boundary_mask[flat_idx] = True
+        thickness = 0.05
+        nodes_top = nodes_2d.copy()
+        nodes_bottom = nodes_2d.copy()
 
-    elements_hex8 = []
-    for i in range(num_r - 1):
-        for j in range(num_theta - 1):
-            for k in range(num_phi):
-                k_next = (k + 1) % num_phi  
+       
+        nodes_top[:, 2] += thickness / 2.0
+        nodes_bottom[:, 2] -= thickness / 2.0
 
-                n0 = node_map[(i,   j,   k)]
-                n1 = node_map[(i+1, j,   k)]
-                n2 = node_map[(i+1, j+1, k)]
-                n3 = node_map[(i,   j+1, k)]
+        nodes_3d = np.vstack([nodes_bottom, nodes_top])
+        boundary_mask = np.zeros(len(nodes_3d), dtype=bool)
+
+       
+        for j in range(num_phi):
+            boundary_mask[node_map_2d[(0, j)]] = True
+            boundary_mask[node_map_2d[(num_theta - 1, j)]] = True
+            boundary_mask[node_map_2d[(0, j)] + num_pts_2d] = True
+            boundary_mask[node_map_2d[(num_theta - 1, j)] + num_pts_2d] = True
+
+        elements_hex8 = []
+        for i in range(num_theta - 1):
+            for j in range(num_phi):
+                j_next = (j + 1) % num_phi
+
                 
-                n4 = node_map[(i,   j,   k_next)]
-                n5 = node_map[(i+1, j,   k_next)]
-                n6 = node_map[(i+1, j+1, k_next)]
-                n7 = node_map[(i,   j+1, k_next)]
+                b0 = node_map_2d[(i, j)]
+                b1 = node_map_2d[(i + 1, j)]
+                b2 = node_map_2d[(i + 1, j_next)]
+                b3 = node_map_2d[(i, j_next)]
 
-                elements_hex8.append([n0, n1, n2, n3, n4, n5, n6, n7])
+                
+                t0 = b0 + num_pts_2d
+                t1 = b1 + num_pts_2d
+                t2 = b2 + num_pts_2d
+                t3 = b3 + num_pts_2d
 
-    return nodes_3d, np.array(elements_hex8), boundary_mask
+                elements_hex8.append([b0, b1, b2, b3, t0, t1, t2, t3])
+
+        return nodes_3d, np.array(elements_hex8), boundary_mask
+
 
 def solve_poisson_3d_fem(case_name, json_filepath):
-    
     try:
         nodes, elements, boundary_mask = load_and_build_3d_hex_mesh(json_filepath)
     except FileNotFoundError:
@@ -110,7 +160,7 @@ def solve_poisson_3d_fem(case_name, json_filepath):
 
     t0_asm = time.perf_counter()
 
-    # (2x2x2 Gauss Quadrature)
+    # 2x2x2 Gauss Quadrature
     g_p = [-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0)]
     gauss_pts_3d = [(xi, eta, zeta) for xi in g_p for eta in g_p for zeta in g_p]
 
@@ -135,11 +185,9 @@ def solve_poisson_3d_fem(case_name, json_filepath):
         ])
         return N, dN_dxi
 
-    
     for elem in elements:
         elem_nodes = nodes[elem].copy()
 
-        
         xi0, eta0, zeta0 = gauss_pts_3d[0]
         _, dN_dp0 = hex8_shape_funcs(xi0, eta0, zeta0)
         J0 = np.dot(dN_dp0, elem_nodes)
@@ -187,7 +235,6 @@ def solve_poisson_3d_fem(case_name, json_filepath):
     t1_asm = time.perf_counter()
     assembly_ms = (t1_asm - t0_asm) * 1000.0
 
-    
     total_defective = inverted_elements_count + degenerate_elements_count
     if total_defective > 0:
         warn_msg = (
@@ -200,7 +247,6 @@ def solve_poisson_3d_fem(case_name, json_filepath):
     else:
         print(f"  ├─ [✅ MESH DIAGNOSTICS] Perfect Mesh Topology! Zero Inverted or Degenerate Elements.")
 
-    
     K = K.tolil()
     boundary_indices = np.where(boundary_mask)[0]
 
@@ -219,13 +265,11 @@ def solve_poisson_3d_fem(case_name, json_filepath):
 
     K = K.tocsr()
 
-    
     t0_sol = time.perf_counter()
     u_h = spla.spsolve(K, F)
     t1_sol = time.perf_counter()
     solve_ms = (t1_sol - t0_sol) * 1000.0
 
-    
     l2_err_sq = 0.0
     h1_err_sq = 0.0
     l2_norm_ex_sq = 0.0
@@ -288,13 +332,13 @@ def solve_poisson_3d_fem(case_name, json_filepath):
 # ==============================================================================
 
 MESH_LEVELS_7 = [
-    {"name": "Level 1", "num_r": 16, "num_theta_pts": 8,  "num_phi": 12},
-    {"name": "Level 2", "num_r": 24, "num_theta_pts": 10, "num_phi": 16},
-    {"name": "Level 3", "num_r": 32, "num_theta_pts": 14, "num_phi": 20},
-    {"name": "Level 4", "num_r": 48, "num_theta_pts": 18, "num_phi": 24},
-    {"name": "Level 5", "num_r": 60, "num_theta_pts": 22, "num_phi": 28},
-    {"name": "Level 6", "num_r": 72, "num_theta_pts": 26, "num_phi": 32},
-    {"name": "Level 7", "num_r": 84, "num_theta_pts": 30, "num_phi": 40}
+    {"name": "Level 1", "num_r": 16, "num_theta_pts": 10, "num_phi": 20},
+    {"name": "Level 2", "num_r": 24, "num_theta_pts": 15, "num_phi": 30},
+    {"name": "Level 3", "num_r": 32, "num_theta_pts": 20, "num_phi": 40},
+    {"name": "Level 4", "num_r": 48, "num_theta_pts": 30, "num_phi": 60},
+    {"name": "Level 5", "num_r": 60, "num_theta_pts": 40, "num_phi": 80},
+    {"name": "Level 6", "num_r": 72, "num_theta_pts": 50, "num_phi": 100},
+    {"name": "Level 7", "num_r": 84, "num_theta_pts": 60, "num_phi": 120}
 ]
 
 def run_dualcase_study():
@@ -318,13 +362,12 @@ def run_dualcase_study():
         case_results = []
         for lvl_idx, lvl in enumerate(MESH_LEVELS_7):
             filename = f"{c['prefix']}_lvl{lvl_idx+1}.json"
-            filepath = os.path.join(MESH_OUTPUT_DIR, filename)  # 打包至生成的資料夾中
+            filepath = os.path.join(MESH_OUTPUT_DIR, filename)
             
-            print(f"\n[🔄 GRID & FEM] {c['id']} - {lvl['name']} ({lvl['num_r']}x{lvl['num_theta_pts']}x{lvl['num_phi']})...")
+            print(f"\n[🔄 GRID & FEM] {c['id']} - {lvl['name']} ({lvl['num_theta_pts']}x{lvl['num_phi']})...")
 
             if c["id"] == "Case A":
                 sys_config.update({
-                    "num_r": lvl["num_r"], 
                     "num_theta_pts": lvl["num_theta_pts"], 
                     "num_phi": lvl["num_phi"],
                     "output_filename": filepath
@@ -373,7 +416,6 @@ def run_dualcase_study():
             "eoc_h1": eoc_h1
         }
 
-    
     print("\n" + "="*125)
     print(" INTERNATIONAL PUBLICATION REPORT: DUAL-CASE TCR (CASE A) vs. PDE BASELINE (CASE B) EOC BENCHMARK")
     print("="*125)
@@ -397,7 +439,7 @@ def run_dualcase_study():
         plot_dualcase_convergence_curves(all_case_results)
 
 def plot_dualcase_convergence_curves(all_case_results):
-    """繪製包含 Case A (TCR) 與 Case B (PDE Baseline) 的收斂圖。"""
+    """繪製包含 Case A (TCR) 與 Case B (PDE Baseline) 的雙對數收斂圖。"""
     plt.figure(figsize=(8.5, 6), dpi=300)
 
     styles = {
@@ -418,8 +460,8 @@ def plot_dualcase_convergence_curves(all_case_results):
     if "Case B" in all_case_results:
         ref_h = np.array(all_case_results["Case B"]["h_vals"])
         ref_l2_base = all_case_results["Case B"]["l2_errs"][0]
-        plt.loglog(ref_h, ref_l2_base * (ref_h / ref_h[0])**2, 'k:', alpha=0.6, label='Theoretical $O(h^2)$ Slope')
-        plt.loglog(ref_h, ref_l2_base * (ref_h / ref_h[0])**1, 'k-.', alpha=0.6, label='Theoretical $O(h^1)$ Slope')
+        plt.loglog(ref_h, ref_l2_base * (ref_h / ref_h[0])**2, 'k:', alpha=0.6, label=r'Theoretical $\mathcal{O}(h^2)$ Slope')
+        plt.loglog(ref_h, ref_l2_base * (ref_h / ref_h[0])**1, 'k-.', alpha=0.6, label=r'Theoretical $\mathcal{O}(h^1)$ Slope')
 
     plt.title("3D FEM Dual-Case Mesh Convergence & EOC Benchmark (Case A: TCR vs. Case B: PDE)", fontsize=11, fontweight='bold')
     plt.xlabel("Characteristic Mesh Size $h$", fontsize=11)
