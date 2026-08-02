@@ -20,7 +20,7 @@ os.makedirs(REPORT_DIR, exist_ok=True)
 os.makedirs(VIS_DIR, exist_ok=True)
 
 
-class Hex8QualityEvaluator:
+class MeshQualityEvaluator:
 
     def __init__(self, json_filepath):
         self.filepath = json_filepath
@@ -29,8 +29,14 @@ class Hex8QualityEvaluator:
             self.data = json.load(f)
 
         self.grid_shape = self.data["grid_shape"]
-        self.num_r, self.num_theta, self.num_phi = self.grid_shape
         self.vertices = self.data["vertices"]
+        self.is_3d = (len(self.grid_shape) == 3)
+
+        if self.is_3d:
+            self.num_r, self.num_theta, self.num_phi = self.grid_shape
+        else:
+            self.num_theta, self.num_phi = self.grid_shape
+            self.num_r = 1
 
         self._build_mesh_topology()
 
@@ -38,32 +44,55 @@ class Hex8QualityEvaluator:
         self.nodes = np.zeros((len(self.vertices), 3), dtype=np.float64)
         node_map = {}
 
-        for v in self.vertices:
-            i, j, k = v["index"]
-            flat_idx = i * (self.num_theta * self.num_phi) + j * self.num_phi + k
-            self.nodes[flat_idx] = v["pos"]
-            node_map[(i, j, k)] = (flat_idx, i, j, k)
+        if self.is_3d:
+            for v in self.vertices:
+                i, j, k = v["index"]
+                flat_idx = i * (self.num_theta * self.num_phi) + j * self.num_phi + k
+                self.nodes[flat_idx] = v["pos"]
+                node_map[(i, j, k)] = flat_idx
 
-        self.elements = []
-        self.elem_indices = []
+            self.elements = []
+            self.elem_indices = []
 
-        for i in range(self.num_r - 1):
-            for j in range(self.num_theta - 1):
-                for k in range(self.num_phi):
-                    k_next = (k + 1) % self.num_phi
+            for i in range(self.num_r - 1):
+                for j in range(self.num_theta - 1):
+                    for k in range(self.num_phi):
+                        k_next = (k + 1) % self.num_phi
 
-                    n0 = node_map[(i,   j,   k)][0]
-                    n1 = node_map[(i+1, j,   k)][0]
-                    n2 = node_map[(i+1, j+1, k)][0]
-                    n3 = node_map[(i,   j+1, k)][0]
+                        n0 = node_map[(i,   j,   k)]
+                        n1 = node_map[(i+1, j,   k)]
+                        n2 = node_map[(i+1, j+1, k)]
+                        n3 = node_map[(i,   j+1, k)]
 
-                    n4 = node_map[(i,   j,   k_next)][0]
-                    n5 = node_map[(i+1, j,   k_next)][0]
-                    n6 = node_map[(i+1, j+1, k_next)][0]
-                    n7 = node_map[(i,   j+1, k_next)][0]
+                        n4 = node_map[(i,   j,   k_next)]
+                        n5 = node_map[(i+1, j,   k_next)]
+                        n6 = node_map[(i+1, j+1, k_next)]
+                        n7 = node_map[(i,   j+1, k_next)]
 
-                    self.elements.append([n0, n1, n2, n3, n4, n5, n6, n7])
-                    self.elem_indices.append((i, j, k))
+                        self.elements.append([n0, n1, n2, n3, n4, n5, n6, n7])
+                        self.elem_indices.append((i, j, k))
+
+        else:
+            for v in self.vertices:
+                i, j = v["index"]
+                flat_idx = i * self.num_phi + j
+                self.nodes[flat_idx] = v["pos"]
+                node_map[(i, j)] = flat_idx
+
+            self.elements = []
+            self.elem_indices = []
+
+            for i in range(self.num_theta - 1):
+                for j in range(self.num_phi):
+                    j_next = (j + 1) % self.num_phi
+
+                    n0 = node_map[(i, j)]
+                    n1 = node_map[(i + 1, j)]
+                    n2 = node_map[(i + 1, j_next)]
+                    n3 = node_map[(i, j_next)]
+
+                    self.elements.append([n0, n1, n2, n3])
+                    self.elem_indices.append((0, i, j))
 
         self.elements = np.array(self.elements)
 
@@ -79,106 +108,165 @@ class Hex8QualityEvaluator:
         ])
 
     def evaluate_mesh(self):
-        g_pts = [-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0)]
-        gauss_3d = [(xi, eta, zeta) for xi in g_pts for eta in g_pts for zeta in g_pts]
-
         metrics = []
         inverted_list = []
 
-        for elem_id, (elem, idx) in enumerate(zip(self.elements, self.elem_indices)):
-            pts = self.nodes[elem].copy()
-            i_idx, j_idx, k_idx = idx
+        if self.is_3d:
+            g_pts = [-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0)]
+            gauss_3d = [(xi, eta, zeta) for xi in g_pts for eta in g_pts for zeta in g_pts]
 
-            dN_center = self._hex8_shape_derivatives(0.0, 0.0, 0.0)
-            J_center = np.dot(dN_center, pts)
-            det_J_center = np.linalg.det(J_center)
+            for elem_id, (elem, idx) in enumerate(zip(self.elements, self.elem_indices)):
+                pts = self.nodes[elem].copy()
+                i_idx, j_idx, k_idx = idx
 
-            if det_J_center < 0.0:
-                pts = pts[[4, 5, 6, 7, 0, 1, 2, 3]]
+                dN_center = self._hex8_shape_derivatives(0.0, 0.0, 0.0)
                 J_center = np.dot(dN_center, pts)
                 det_J_center = np.linalg.det(J_center)
 
-            det_J_min = det_J_center
-            for xi, eta, zeta in gauss_3d:
-                dN = self._hex8_shape_derivatives(xi, eta, zeta)
-                J_gp = np.dot(dN, pts)
-                det_J_gp = np.linalg.det(J_gp)
-                if det_J_gp < det_J_min:
-                    det_J_min = det_J_gp
+                if det_J_center < 0.0:
+                    pts = pts[[4, 5, 6, 7, 0, 1, 2, 3]]
+                    J_center = np.dot(dN_center, pts)
+                    det_J_center = np.linalg.det(J_center)
 
-            is_inverted = det_J_min <= 0.0
+                det_J_min = det_J_center
+                for xi, eta, zeta in gauss_3d:
+                    dN = self._hex8_shape_derivatives(xi, eta, zeta)
+                    J_gp = np.dot(dN, pts)
+                    det_J_gp = np.linalg.det(J_gp)
+                    if det_J_gp < det_J_min:
+                        det_J_min = det_J_gp
 
-            if abs(det_J_center) > 1e-12:
-                inv_J = np.linalg.inv(J_center)
-                norm_J = np.linalg.norm(J_center, 'fro')
-                norm_inv_J = np.linalg.norm(inv_J, 'fro')
-                cond_num = (norm_J * norm_inv_J) / 3.0
-            else:
-                cond_num = 1e6
+                is_inverted = det_J_min <= 0.0
 
+                if abs(det_J_center) > 1e-12:
+                    inv_J = np.linalg.inv(J_center)
+                    norm_J = np.linalg.norm(J_center, 'fro')
+                    norm_inv_J = np.linalg.norm(inv_J, 'fro')
+                    cond_num = (norm_J * norm_inv_J) / 3.0
+                else:
+                    cond_num = 1e6
+
+                edges = [
+                    pts[1]-pts[0], pts[2]-pts[1], pts[3]-pts[2], pts[0]-pts[3],
+                    pts[5]-pts[4], pts[6]-pts[5], pts[7]-pts[6], pts[4]-pts[7],
+                    pts[4]-pts[0], pts[5]-pts[1], pts[6]-pts[2], pts[7]-pts[3]
+                ]
+                edge_lens = [np.linalg.norm(e) for e in edges]
+                aspect_ratio = max(edge_lens) / max(1e-4, min(edge_lens))
+
+                v_xi, v_eta, v_zeta = J_center[0, :], J_center[1, :], J_center[2, :]
+                norm_xi, norm_eta, norm_zeta = np.linalg.norm(v_xi), np.linalg.norm(v_eta), np.linalg.norm(v_zeta)
+
+                def get_angle_error(v1, v2, n1, n2):
+                    if n1 * n2 > 1e-12:
+                        cos_val = abs(np.dot(v1, v2) / (n1 * n2))
+                        return np.arcsin(np.clip(cos_val, 0.0, 1.0)) * (180.0 / np.pi)
+                    return 90.0
+
+                err_xi_eta = get_angle_error(v_xi, v_eta, norm_xi, norm_eta)
+                err_eta_zeta = get_angle_error(v_eta, v_zeta, norm_eta, norm_zeta)
+                err_zeta_xi = get_angle_error(v_zeta, v_xi, norm_zeta, norm_xi)
+                max_ortho_error = max(err_xi_eta, err_eta_zeta, err_zeta_xi)
+                skewness = max_ortho_error / 90.0
+
+                is_pole = (j_idx == 0) or (j_idx == self.num_theta - 2)
+                is_equator = abs(j_idx - (self.num_theta // 2)) <= 1
+                is_seam = (k_idx == 0) or (k_idx == self.num_phi - 1)
+
+                region_tag = "Interior"
+                if is_pole:
+                    region_tag = "Pole"
+                elif is_equator:
+                    region_tag = "Equator"
+                if is_seam:
+                    region_tag += "+Seam" if region_tag != "Interior" else "Seam"
+
+                center_pos = np.mean(pts, axis=0)
+
+                record = {
+                    "elem_id": elem_id,
+                    "grid_idx_i_j_k": f"{i_idx}_{j_idx}_{k_idx}",
+                    "region": region_tag,
+                    "center_x": center_pos[0],
+                    "center_y": center_pos[1],
+                    "center_z": center_pos[2],
+                    "det_J_min": det_J_min,
+                    "det_J_center": det_J_center,
+                    "aspect_ratio": aspect_ratio,
+                    "skewness": skewness,
+                    "cond_number": cond_num,
+                    "ortho_err_xi_eta_deg": err_xi_eta,
+                    "ortho_err_eta_zeta_deg": err_eta_zeta,
+                    "ortho_err_zeta_xi_deg": err_zeta_xi,
+                    "max_ortho_err_deg": max_ortho_error,
+                    "is_inverted": is_inverted
+                }
+                metrics.append(record)
+                if is_inverted:
+                    inverted_list.append(record)
+
+        else:
             
-            edges = [
-                pts[1]-pts[0], pts[2]-pts[1], pts[3]-pts[2], pts[0]-pts[3],
-                pts[5]-pts[4], pts[6]-pts[5], pts[7]-pts[6], pts[4]-pts[7],
-                pts[4]-pts[0], pts[5]-pts[1], pts[6]-pts[2], pts[7]-pts[3]
-            ]
-            edge_lens = [np.linalg.norm(e) for e in edges]
-            max_edge = max(edge_lens)
-            min_edge = max(1e-4, min(edge_lens))  
-            aspect_ratio = max_edge / min_edge
+            for elem_id, (elem, idx) in enumerate(zip(self.elements, self.elem_indices)):
+                pts = self.nodes[elem].copy()
+                _, j_idx, k_idx = idx
 
-            v_xi, v_eta, v_zeta = J_center[0, :], J_center[1, :], J_center[2, :]
-            norm_xi, norm_eta, norm_zeta = np.linalg.norm(v_xi), np.linalg.norm(v_eta), np.linalg.norm(v_zeta)
+                
+                e0 = pts[1] - pts[0]
+                e1 = pts[2] - pts[1]
+                e2 = pts[3] - pts[2]
+                e3 = pts[0] - pts[3]
 
-            def get_angle_error(v1, v2, n1, n2):
-                if n1 * n2 > 1e-12:
-                    cos_val = abs(np.dot(v1, v2) / (n1 * n2))
-                    return np.arcsin(np.clip(cos_val, 0.0, 1.0)) * (180.0 / np.pi)
-                return 90.0
+                edge_lens = [np.linalg.norm(e0), np.linalg.norm(e1), np.linalg.norm(e2), np.linalg.norm(e3)]
+                aspect_ratio = max(edge_lens) / max(1e-4, min(edge_lens))
 
-            err_xi_eta = get_angle_error(v_xi, v_eta, norm_xi, norm_eta)
-            err_eta_zeta = get_angle_error(v_eta, v_zeta, norm_eta, norm_zeta)
-            err_zeta_xi = get_angle_error(v_zeta, v_xi, norm_zeta, norm_xi)
+                
+                cross_v = np.cross(e0, -e3)
+                det_J_center = np.linalg.norm(cross_v)
+                det_J_min = det_J_center
+                is_inverted = det_J_min <= 0.0
 
-            max_ortho_error = max(err_xi_eta, err_eta_zeta, err_zeta_xi)
-            skewness = max_ortho_error / 90.0
+               
+                cos_theta = abs(np.dot(e0, -e3) / max(1e-12, edge_lens[0] * edge_lens[3]))
+                max_ortho_error = np.arcsin(np.clip(cos_theta, 0.0, 1.0)) * (180.0 / np.pi)
+                skewness = max_ortho_error / 90.0
+                cond_num = aspect_ratio * (1.0 + skewness)
 
-            is_pole = (j_idx == 0) or (j_idx == self.num_theta - 2)
-            is_equator = abs(j_idx - (self.num_theta // 2)) <= 1
-            is_seam = (k_idx == 0) or (k_idx == self.num_phi - 1)
+                is_pole = (j_idx == 0) or (j_idx == self.num_theta - 2)
+                is_equator = abs(j_idx - (self.num_theta // 2)) <= 1
+                is_seam = (k_idx == 0) or (k_idx == self.num_phi - 1)
 
-            region_tag = "Interior"
-            if is_pole:
-                region_tag = "Pole"
-            elif is_equator:
-                region_tag = "Equator"
-            if is_seam:
-                region_tag += "+Seam" if region_tag != "Interior" else "Seam"
+                region_tag = "Interior"
+                if is_pole:
+                    region_tag = "Pole"
+                elif is_equator:
+                    region_tag = "Equator"
+                if is_seam:
+                    region_tag += "+Seam" if region_tag != "Interior" else "Seam"
 
-            center_pos = np.mean(pts, axis=0)
+                center_pos = np.mean(pts, axis=0)
 
-            record = {
-                "elem_id": elem_id,
-                "grid_idx_i_j_k": f"{i_idx}_{j_idx}_{k_idx}",
-                "region": region_tag,
-                "center_x": center_pos[0],
-                "center_y": center_pos[1],
-                "center_z": center_pos[2],
-                "det_J_min": det_J_min,
-                "det_J_center": det_J_center,
-                "aspect_ratio": aspect_ratio,
-                "skewness": skewness,
-                "cond_number": cond_num,
-                "ortho_err_xi_eta_deg": err_xi_eta,
-                "ortho_err_eta_zeta_deg": err_eta_zeta,
-                "ortho_err_zeta_xi_deg": err_zeta_xi,
-                "max_ortho_err_deg": max_ortho_error,
-                "is_inverted": is_inverted
-            }
-
-            metrics.append(record)
-            if is_inverted:
-                inverted_list.append(record)
+                record = {
+                    "elem_id": elem_id,
+                    "grid_idx_i_j_k": f"0_{j_idx}_{k_idx}",
+                    "region": region_tag,
+                    "center_x": center_pos[0],
+                    "center_y": center_pos[1],
+                    "center_z": center_pos[2],
+                    "det_J_min": det_J_min,
+                    "det_J_center": det_J_center,
+                    "aspect_ratio": aspect_ratio,
+                    "skewness": skewness,
+                    "cond_number": cond_num,
+                    "ortho_err_xi_eta_deg": max_ortho_error,
+                    "ortho_err_eta_zeta_deg": 0.0,
+                    "ortho_err_zeta_xi_deg": 0.0,
+                    "max_ortho_err_deg": max_ortho_error,
+                    "is_inverted": is_inverted
+                }
+                metrics.append(record)
+                if is_inverted:
+                    inverted_list.append(record)
 
         return metrics, inverted_list
 
@@ -189,36 +277,51 @@ class Mesh3DVisualizer:
         self.evaluator = evaluator
         self.nodes = evaluator.nodes
         self.elements = evaluator.elements
-        self.num_r, self.num_theta, self.num_phi = evaluator.grid_shape
+        self.is_3d = evaluator.is_3d
 
     def render_and_save_3d_mesh(self, inverted_list, save_filename):
         fig = plt.figure(figsize=(10, 8), dpi=300)
         ax = fig.add_subplot(111, projection='3d')
 
-        
-        step_r = max(1, self.num_r // 12)
-        step_theta = max(1, self.num_theta // 6)
-        step_phi = max(1, self.num_phi // 16)
+        if self.is_3d:
+            num_r, num_theta, num_phi = self.evaluator.grid_shape
+            step_r = max(1, num_r // 12)
+            step_theta = max(1, num_theta // 6)
+            step_phi = max(1, num_phi // 16)
 
-        grid_tensor = self.nodes.reshape((self.num_r, self.num_theta, self.num_phi, 3))
+            grid_tensor = self.nodes.reshape((num_r, num_theta, num_phi, 3))
 
-        # 1. 繪製經向線條
-        for i in range(0, self.num_r, step_r):
-            for k in range(0, self.num_phi, step_phi):
-                ax.plot(grid_tensor[i, :, k, 0], grid_tensor[i, :, k, 1], grid_tensor[i, :, k, 2], 
-                        color='navy', alpha=0.25, linewidth=0.5)
+            for i in range(0, num_r, step_r):
+                for k in range(0, num_phi, step_phi):
+                    ax.plot(grid_tensor[i, :, k, 0], grid_tensor[i, :, k, 1], grid_tensor[i, :, k, 2], 
+                            color='navy', alpha=0.25, linewidth=0.5)
 
-        # 2. 繪製緯向環形線條
-        for i in range(0, self.num_r, step_r):
-            for j in range(0, self.num_theta, step_theta):
-                
-                phi_ring_x = np.append(grid_tensor[i, j, :, 0], grid_tensor[i, j, 0, 0])
-                phi_ring_y = np.append(grid_tensor[i, j, :, 1], grid_tensor[i, j, 0, 1])
-                phi_ring_z = np.append(grid_tensor[i, j, :, 2], grid_tensor[i, j, 0, 2])
+            for i in range(0, num_r, step_r):
+                for j in range(0, num_theta, step_theta):
+                    phi_ring_x = np.append(grid_tensor[i, j, :, 0], grid_tensor[i, j, 0, 0])
+                    phi_ring_y = np.append(grid_tensor[i, j, :, 1], grid_tensor[i, j, 0, 1])
+                    phi_ring_z = np.append(grid_tensor[i, j, :, 2], grid_tensor[i, j, 0, 2])
+                    ax.plot(phi_ring_x, phi_ring_y, phi_ring_z, 
+                            color='crimson', alpha=0.15, linewidth=0.4)
+        else:
+            num_theta, num_phi = self.evaluator.grid_shape
+            step_theta = max(1, num_theta // 10)
+            step_phi = max(1, num_phi // 16)
+
+            grid_tensor = self.nodes.reshape((num_theta, num_phi, 3))
+
+            for k in range(0, num_phi, step_phi):
+                ax.plot(grid_tensor[:, k, 0], grid_tensor[:, k, 1], grid_tensor[:, k, 2], 
+                        color='navy', alpha=0.4, linewidth=0.6)
+
+            for j in range(0, num_theta, step_theta):
+                phi_ring_x = np.append(grid_tensor[j, :, 0], grid_tensor[j, 0, 0])
+                phi_ring_y = np.append(grid_tensor[j, :, 1], grid_tensor[j, 0, 1])
+                phi_ring_z = np.append(grid_tensor[j, :, 2], grid_tensor[j, 0, 2])
                 ax.plot(phi_ring_x, phi_ring_y, phi_ring_z, 
-                        color='crimson', alpha=0.15, linewidth=0.4)
+                        color='crimson', alpha=0.3, linewidth=0.5)
 
-        ax.set_title(f"3D Mesh Manifold Visualization\n[{self.evaluator.filename}]", fontsize=11, fontweight='bold')
+        ax.set_title(f"Mesh Manifold Quality Visualization\n[{self.evaluator.filename}]", fontsize=11, fontweight='bold')
         ax.set_xlabel("X Axis")
         ax.set_ylabel("Y Axis")
         ax.set_zlabel("Z Axis")
@@ -242,7 +345,7 @@ class Mesh3DVisualizer:
         plt.savefig(out_path, dpi=300)
         plt.close()
 
-        print(f"  └─ [3D Mesh Rendered] Saved visualization plot as '{out_path}'")
+        print(f"  └─ [Mesh Rendered] Saved visualization plot as '{out_path}'")
 
 
 # ==============================================================================
@@ -251,19 +354,19 @@ class Mesh3DVisualizer:
 
 def run_mesh_quality_suite():
     print("=" * 110)
-    print("   EXPLICIT MESH QUALITY, INVERTED ELEMENT & 3D MESH VISUALIZATION SUITE")
+    print("   EXPLICIT MESH QUALITY, INVERTED ELEMENT & MESH VISUALIZATION SUITE")
     print("=" * 110)
 
     mesh_files = [f for f in os.listdir(MESH_DIR) if f.endswith(".json")]
     if not mesh_files:
-        print(f"[❌ ERROR] No JSON mesh files found in '{MESH_DIR}'. Please run fem_poisson_solver.py first.")
+        print(f"[❌ ERROR] No JSON mesh files found in '{MESH_DIR}'. Please generate meshes first.")
         return
 
     summary_rows = []
 
     for mfile in sorted(mesh_files):
         fpath = os.path.join(MESH_DIR, mfile)
-        evaluator = Hex8QualityEvaluator(fpath)
+        evaluator = MeshQualityEvaluator(fpath)
         metrics, inverted_list = evaluator.evaluate_mesh()
 
         base_name = os.path.splitext(mfile)[0]
@@ -284,7 +387,7 @@ def run_mesh_quality_suite():
                 f.write("No inverted elements detected in this mesh. Topology is perfectly healthy.\n")
 
         visualizer = Mesh3DVisualizer(evaluator)
-        vis_png_name = f"{base_name}_3d_manifold.png"
+        vis_png_name = f"{base_name}_manifold.png"
         visualizer.render_and_save_3d_mesh(inverted_list, vis_png_name)
 
         poles_metrics = [m for m in metrics if "Pole" in m["region"]]
@@ -322,7 +425,7 @@ def run_mesh_quality_suite():
         writer.writeheader()
         writer.writerows(summary_rows)
 
-    print(f"\n[📊 REPORTS EXPORTED] Detailed CSV reports and 3D plots generated in directory: '{REPORT_DIR}/'")
+    print(f"\n[📊 REPORTS EXPORTED] Detailed CSV reports and plots generated in directory: '{REPORT_DIR}/'")
 
     plot_quality_comparison_charts(summary_rows)
 
@@ -336,14 +439,16 @@ def plot_quality_comparison_charts(summary_rows):
     fig, axes = plt.subplots(2, 2, figsize=(12, 9), dpi=300)
 
     axes[0, 0].plot(levels, [r["inverted_ratio_pct"] for r in tcr_rows], 'o-', color='navy', label='Case A (TCR)')
-    axes[0, 0].plot(levels, [r["inverted_ratio_pct"] for r in pde_rows], 's--', color='crimson', label='Case B (PDE)')
+    if pde_rows:
+        axes[0, 0].plot(levels[:len(pde_rows)], [r["inverted_ratio_pct"] for r in pde_rows], 's--', color='crimson', label='Case B (PDE)')
     axes[0, 0].set_title("Inverted Element Ratio (%)", fontweight='bold')
     axes[0, 0].set_ylabel("Inverted Ratio (%)")
     axes[0, 0].grid(True, linestyle="--", alpha=0.5)
     axes[0, 0].legend()
 
     axes[0, 1].plot(levels, [r["max_cond_number"] for r in tcr_rows], 'o-', color='navy', label='Case A (TCR)')
-    axes[0, 1].plot(levels, [r["max_cond_number"] for r in pde_rows], 's--', color='crimson', label='Case B (PDE)')
+    if pde_rows:
+        axes[0, 1].plot(levels[:len(pde_rows)], [r["max_cond_number"] for r in pde_rows], 's--', color='crimson', label='Case B (PDE)')
     axes[0, 1].set_title("Max Element Condition Number", fontweight='bold')
     axes[0, 1].set_yscale('log')
     axes[0, 1].set_ylabel("Condition Number (Log Scale)")
@@ -351,8 +456,9 @@ def plot_quality_comparison_charts(summary_rows):
     axes[0, 1].legend()
 
     axes[1, 0].plot(levels, [r["max_ortho_err_deg"] for r in tcr_rows], 'o-', color='navy', label='Case A (TCR)')
-    axes[1, 0].plot(levels, [r["max_ortho_err_deg"] for r in pde_rows], 's--', color='crimson', label='Case B (PDE)')
-    axes[1, 0].set_title("Max 3D Orthogonality Error (Degrees)", fontweight='bold')
+    if pde_rows:
+        axes[1, 0].plot(levels[:len(pde_rows)], [r["max_ortho_err_deg"] for r in pde_rows], 's--', color='crimson', label='Case B (PDE)')
+    axes[1, 0].set_title("Max Orthogonality Error (Degrees)", fontweight='bold')
     axes[1, 0].set_ylabel("Max Angle Error (°)")
     axes[1, 0].grid(True, linestyle="--", alpha=0.5)
     axes[1, 0].legend()
@@ -370,7 +476,7 @@ def plot_quality_comparison_charts(summary_rows):
         axes[1, 1].set_ylabel("Max Orthogonality Error (°)")
         axes[1, 1].grid(True, linestyle="--", alpha=0.5)
 
-    plt.suptitle("3D Mesh Quality, Topology Degradation & Regional Distortion Diagnostics", fontsize=13, fontweight='bold')
+    plt.suptitle("Mesh Quality, Topology Degradation & Regional Distortion Diagnostics", fontsize=13, fontweight='bold')
     plt.tight_layout()
 
     plot_path = os.path.join(REPORT_DIR, "mesh_quality_comparison_suite.png")
