@@ -73,6 +73,7 @@ class MeshQualityEvaluator:
                         self.elem_indices.append((i, j, k))
 
         else:
+            # 2D TCR 曲面網格拓樸 (Quad4)
             for v in self.vertices:
                 i, j = v["index"]
                 flat_idx = i * self.num_phi + j
@@ -206,12 +207,11 @@ class MeshQualityEvaluator:
                     inverted_list.append(record)
 
         else:
-            
+            # 2D Quad4 網格質量評估 (TCR 曲面)
             for elem_id, (elem, idx) in enumerate(zip(self.elements, self.elem_indices)):
                 pts = self.nodes[elem].copy()
                 _, j_idx, k_idx = idx
 
-                
                 e0 = pts[1] - pts[0]
                 e1 = pts[2] - pts[1]
                 e2 = pts[3] - pts[2]
@@ -220,13 +220,11 @@ class MeshQualityEvaluator:
                 edge_lens = [np.linalg.norm(e0), np.linalg.norm(e1), np.linalg.norm(e2), np.linalg.norm(e3)]
                 aspect_ratio = max(edge_lens) / max(1e-4, min(edge_lens))
 
-                
                 cross_v = np.cross(e0, -e3)
                 det_J_center = np.linalg.norm(cross_v)
                 det_J_min = det_J_center
                 is_inverted = det_J_min <= 0.0
 
-               
                 cos_theta = abs(np.dot(e0, -e3) / max(1e-12, edge_lens[0] * edge_lens[3]))
                 max_ortho_error = np.arcsin(np.clip(cos_theta, 0.0, 1.0)) * (180.0 / np.pi)
                 skewness = max_ortho_error / 90.0
